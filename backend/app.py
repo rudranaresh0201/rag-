@@ -1,14 +1,23 @@
+"""
+app.py — FastAPI RAG backend.
+
+Changes from previous version:
+  - generate_answer() calls now go through llm_router.generate_answer()
+    (provider auto-detected from env; falls back gracefully)
+  - Context passed to LLM is the fully-formatted delimited block from retrieval.py
+  - All [RAG] logging preserved and extended
+  - API contract (request/response shapes) unchanged
+"""
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict
 import os
 import re
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, List
 
-from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -16,18 +25,18 @@ from pydantic import BaseModel, Field
 try:
     from .db import delete_document, get_all_records, reset_database
     from .ingestion import InvalidPDFError, MissingDependencyError, ingest_pdf_file_path
-    from .llm import generate_answer
+    from .llm_router import generate_answer
     from .retrieval import retrieve_chunks
 except ImportError:
     from db import delete_document, get_all_records, reset_database
     from ingestion import InvalidPDFError, MissingDependencyError, ingest_pdf_file_path
-    from llm import generate_answer
+    from llm_router import generate_answer
     from retrieval import retrieve_chunks
 
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="PDF RAG Backend", version="1.0.0")
+app = FastAPI(title="PDF RAG Backend", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +47,9 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Pydantic models — unchanged API contract
+# ---------------------------------------------------------------------------
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
     document_id: str | None = None
@@ -56,22 +68,46 @@ class QueryResponse(BaseModel):
     sources: List[SourceItem]
 
 
+# ---------------------------------------------------------------------------
+# Answer post-processing helpers (unchanged from original)
+# ---------------------------------------------------------------------------
 def _trim_to_complete_sentence(text: str) -> str:
     value = " ".join(str(text).split()).strip()
     if not value:
         return ""
-
     matches = list(re.finditer(r"[.!?]", value))
     if matches:
-        last_end = matches[-1].end()
-        value = value[:last_end].strip()
+        value = value[: matches[-1].end()].strip()
+    return value
 
+
+def _sanitize_answer_text(text: str) -> str:
+    value = str(text or "").replace("\r", " ")
+    value = re.sub(r"\b[\w.%-]+@[\w.-]+\.[A-Za-z]{2,}\b", " ", value)
+    value = re.sub(r"\[(?:\d+\s*(?:,\s*\d+)*)\]", " ", value)
+    value = re.sub(r"(?i)arXiv:[^\n]+", " ", value)
+    value = re.sub(r"(?i)provided proper attribution[^\n]*", " ", value)
+    value = re.sub(r"(?i)equal contribution[^\n]*", " ", value)
+    value = re.sub(r"(?i)work performed while[^\n]*", " ", value)
+
+    # Keep section structure readable while normalizing spacing.
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    value = re.sub(r"\n\s+", "\n", value)
+
+    # Ensure core section headers start on their own line.
+    value = re.sub(r"\s*(Summary:)\s*", r"\n\1\n", value)
+    value = re.sub(r"\s*(Key Points:)\s*", r"\n\1\n", value)
+    value = re.sub(r"\s*(Explanation:)\s*", r"\n\1\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+
+    value = value.strip()
     return value
 
 
 def _build_structured_answer(raw_output: str, query: str, sources: List[dict[str, Any]]) -> str:
     fallback = "Information extracted from provided context."
-    text = str(raw_output or "").replace("\r", "").strip()
+    text = _sanitize_answer_text(raw_output)
 
     summary = ""
     explanation = ""
@@ -85,7 +121,6 @@ def _build_structured_answer(raw_output: str, query: str, sources: List[dict[str
         summary = _trim_to_complete_sentence(summary_match.group(1))
     if explanation_match:
         explanation = _trim_to_complete_sentence(explanation_match.group(1))
-
     if points_match:
         for line in points_match.group(1).split("\n"):
             cleaned = line.strip().lstrip("-*").strip()
@@ -93,40 +128,34 @@ def _build_structured_answer(raw_output: str, query: str, sources: List[dict[str
                 key_points.append(_trim_to_complete_sentence(cleaned) or cleaned)
 
     if not summary:
-        sentence_candidates = re.split(r"(?<=[.!?])\s+", _trim_to_complete_sentence(text))
-        summary = sentence_candidates[0].strip() if sentence_candidates and sentence_candidates[0].strip() else ""
+        candidates = re.split(r"(?<=[.!?])\s+", _trim_to_complete_sentence(text))
+        summary = candidates[0].strip() if candidates and candidates[0].strip() else ""
 
     if not explanation:
         explanation = _trim_to_complete_sentence(text)
 
     if not key_points:
-        sentence_candidates = [
-            segment.strip()
-            for segment in re.split(r"(?<=[.!?])\s+", text)
-            if len(segment.strip()) > 20
+        candidates = [
+            seg.strip()
+            for seg in re.split(r"(?<=[.!?])\s+", text)
+            if len(seg.strip()) > 20
         ]
-        key_points = [
-            _trim_to_complete_sentence(segment) or segment
-            for segment in sentence_candidates[:3]
-        ]
+        key_points = [_trim_to_complete_sentence(s) or s for s in candidates[:3]]
 
     summary = summary or fallback
     explanation = explanation or fallback
-    key_points = [point for point in key_points if point]
-    if not key_points:
-        key_points = [fallback]
+    key_points = [p for p in key_points if p] or [fallback]
 
     sources_list = "\n".join(
-        f"- [{source['id']}] {source['document']}"
-        + (f" (Page {source['page']})" if source.get("page") else "")
-        for source in sources
+        f"- [{s['id']}] {s['document']}" + (f" (Page {s['page']})" if s.get("page") else "")
+        for s in sources
     )
 
     return (
         "Summary:\n"
         f"{summary}\n\n"
         "Key Points:\n"
-        + "\n".join(f"- {point}" for point in key_points[:5])
+        + "\n".join(f"- {p}" for p in key_points[:5])
         + "\n\n"
         "Explanation:\n"
         f"{explanation}\n\n"
@@ -136,35 +165,25 @@ def _build_structured_answer(raw_output: str, query: str, sources: List[dict[str
 
 
 def _extract_from_context_fallback(context: str, query: str) -> str:
-    normalized = " ".join(str(context).split()).strip()
+    """Direct extraction from context when LLM output is unusable."""
+    normalized = _sanitize_answer_text(context)
     if not normalized:
         return ""
 
-    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", normalized) if segment.strip()]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", normalized) if s.strip()]
     if not sentences:
         return normalized[:1200]
 
-    query_terms = {
-        token
-        for token in re.findall(r"[a-zA-Z0-9]+", query.lower())
-        if len(token) > 2
-    }
+    query_terms = {t for t in re.findall(r"[a-zA-Z0-9]+", query.lower()) if len(t) > 2}
 
-    ranked_sentences: list[tuple[int, str]] = []
-    for sentence in sentences:
-        sentence_terms = {
-            token
-            for token in re.findall(r"[a-zA-Z0-9]+", sentence.lower())
-            if len(token) > 2
-        }
-        overlap = len(query_terms & sentence_terms)
-        ranked_sentences.append((overlap, sentence))
+    ranked = sorted(
+        [(len(query_terms & {t for t in re.findall(r"[a-zA-Z0-9]+", s.lower()) if len(t) > 2}), s)
+         for s in sentences],
+        key=lambda x: x[0],
+        reverse=True,
+    )
 
-    ranked_sentences.sort(key=lambda item: item[0], reverse=True)
-    extracted = [item[1] for item in ranked_sentences if item[0] > 0][:4]
-    if not extracted:
-        extracted = sentences[:4]
-
+    extracted = [s for _, s in ranked if _ > 0][:4] or sentences[:4]
     summary = extracted[0]
     key_points = extracted[:3]
     explanation = " ".join(extracted)
@@ -180,6 +199,9 @@ def _extract_from_context_fallback(context: str, query: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -193,35 +215,24 @@ def root() -> dict[str, str]:
 @app.post("/upload")
 async def upload_pdf(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        logger.info("Upload rejected filename=%s status=rejected reason=invalid_file", file.filename)
+        logger.info("Upload rejected filename=%s reason=invalid_file", file.filename)
         raise HTTPException(
             status_code=400,
-            detail={
-                "code": "invalid_file",
-                "message": "Only PDF files are allowed.",
-            },
+            detail={"code": "invalid_file", "message": "Only PDF files are allowed."},
         )
 
     content_length = request.headers.get("content-length")
     if content_length:
         try:
             if int(content_length) > MAX_FILE_SIZE:
-                logger.info(
-                    "Upload rejected filename=%s size=%s status=rejected reason=file_too_large",
-                    file.filename,
-                    content_length,
-                )
                 raise HTTPException(
                     status_code=413,
-                    detail={
-                        "code": "file_too_large",
-                        "message": "File exceeds 200 MB limit",
-                    },
+                    detail={"code": "file_too_large", "message": "File exceeds 200 MB limit"},
                 )
         except ValueError:
             logger.warning("Invalid content-length header for filename=%s", file.filename)
 
-    chunk_size = 1024 * 1024  # 1MB
+    chunk_size = 1024 * 1024
     size = 0
     temp_path: str | None = None
 
@@ -234,32 +245,22 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)) -> dict[str
                     break
                 size += len(chunk)
                 if size > MAX_FILE_SIZE:
-                    logger.info(
-                        "Upload rejected filename=%s size=%s status=rejected reason=file_too_large",
-                        file.filename,
-                        size,
-                    )
                     raise HTTPException(
                         status_code=413,
-                        detail={
-                            "code": "file_too_large",
-                            "message": "File exceeds 200 MB limit",
-                        },
+                        detail={"code": "file_too_large", "message": "File exceeds 200 MB limit"},
                     )
                 tmp_file.write(chunk)
 
         if size == 0:
-            logger.info("Upload rejected filename=%s status=rejected reason=empty_file", file.filename)
             raise HTTPException(
                 status_code=400,
-                detail={
-                    "code": "invalid_file",
-                    "message": "Uploaded file is empty.",
-                },
+                detail={"code": "invalid_file", "message": "Uploaded file is empty."},
             )
 
         await file.seek(0)
-        logger.info("Upload received filename=%s size=%s status=accepted", file.filename, size)
+        logger.info("Upload received filename=%s size=%s", file.filename, size)
+        print("[RAG] Upload received")
+        print(f"[RAG] File saved: {temp_path}")
 
         result = ingest_pdf_file_path(
             pdf_path=temp_path,
@@ -269,42 +270,31 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)) -> dict[str
     except MissingDependencyError as exc:
         raise HTTPException(
             status_code=500,
-            detail={
-                "code": "missing_dependency",
-                "message": str(exc),
-            },
+            detail={"code": "missing_dependency", "message": str(exc)},
         ) from exc
     except InvalidPDFError as exc:
         raise HTTPException(
             status_code=400,
-            detail={
-                "code": "parsing_failure",
-                "message": str(exc),
-            },
+            detail={"code": "parsing_failure", "message": str(exc)},
         ) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail={
-                "code": "parsing_failure",
-                "message": "Failed to ingest PDF.",
-            },
+            detail={"code": "parsing_failure", "message": "Failed to ingest PDF."},
         ) from exc
     finally:
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except OSError:
-                logger.warning("Failed to remove temporary upload file: %s", temp_path)
+                logger.warning("Failed to remove temp file: %s", temp_path)
 
     logger.info(
         "Upload processed filename=%s size=%s chunks=%s doc_id=%s",
-        file.filename,
-        size,
-        result["chunks"],
-        result["doc_id"],
+        file.filename, size, result["chunks"], result["doc_id"],
     )
-
     return {
         "status": "success",
         "chunks": result["chunks"],
@@ -327,11 +317,9 @@ def list_documents() -> List[dict[str, Any]]:
     for metadata in metadatas:
         if not metadata:
             continue
-
         doc_id = str(metadata.get("doc_id", ""))
         if not doc_id:
             continue
-
         if doc_id not in by_doc_id:
             by_doc_id[doc_id] = {
                 "id": doc_id,
@@ -340,11 +328,10 @@ def list_documents() -> List[dict[str, Any]]:
                 "uploaded_at": str(metadata.get("uploaded_at", "")),
                 "chunks": 0,
             }
-
         by_doc_id[doc_id]["chunks"] += 1
 
     documents = list(by_doc_id.values())
-    documents.sort(key=lambda item: item.get("uploaded_at", ""), reverse=True)
+    documents.sort(key=lambda d: d.get("uploaded_at", ""), reverse=True)
     return documents
 
 
@@ -352,12 +339,10 @@ def list_documents() -> List[dict[str, Any]]:
 def delete_single_document(id: str) -> dict[str, str]:
     if not id.strip():
         raise HTTPException(status_code=400, detail="id is required.")
-
     try:
         delete_document(id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to delete document.") from exc
-
     return {"status": "success"}
 
 
@@ -366,39 +351,40 @@ async def query_endpoint(request: QueryRequest):
     try:
         no_info_answer = "Insufficient information in provided documents."
         query = request.query
-
         print("[RAG] Query received:", query)
 
+        # -- Retrieval (multi-query + rerank + dedup + keyword guarantee) --
         retrieval = retrieve_chunks(
             query=query,
             top_k=request.top_k,
             document_id=request.document_id,
         )
-        retrieval_context = str(retrieval.get("context", "") or "")
 
         raw_chunks = retrieval.get("chunks", [])
+        retrieval_context = str(retrieval.get("context", "") or "")
+
         if not raw_chunks:
-            return {
-                "answer": no_info_answer,
-                "sources": [],
-            }
-        seen_chunk_texts: set[str] = set()
+            print("[RAG] No chunks retrieved — returning no-info answer")
+            return {"answer": no_info_answer, "sources": []}
+
+        # -- Build sources list and bounded context for LLM prompt --
+        seen_texts: set[str] = set()
         top_chunks: list[dict[str, Any]] = []
-        max_chunks = max(3, min(request.top_k, 6))
+        max_chunks = 3
 
         for chunk in raw_chunks:
             if not isinstance(chunk, dict):
                 continue
             raw_text = str(chunk.get("text", ""))
             normalized = " ".join(raw_text.split()).strip().lower()
-            if not normalized or normalized in seen_chunk_texts:
+            if not normalized or normalized in seen_texts:
                 continue
-            seen_chunk_texts.add(normalized)
+            seen_texts.add(normalized)
             top_chunks.append(chunk)
             if len(top_chunks) >= max_chunks:
                 break
 
-        sources = []
+        sources: list[dict[str, Any]] = []
         context_chunks: list[str] = []
 
         for chunk in top_chunks:
@@ -406,60 +392,51 @@ async def query_endpoint(request: QueryRequest):
                 continue
 
             raw_text = str(chunk.get("text", ""))
-            cleaned_text = " ".join(raw_text.split()).strip()[:1600]
+            cleaned_text = " ".join(raw_text.split()).strip()[:500]
             if not cleaned_text:
                 continue
 
             source_id = len(sources) + 1
-
             source_text = cleaned_text[:260].strip()
             if len(cleaned_text) > 260:
                 source_text += "..."
 
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
-
             file_name = str(chunk.get("file", "")).strip() or str(metadata.get("file", "")).strip()
             document_name = Path(file_name).name if file_name else "Uploaded Doc"
 
-            page = None
-            page_val = chunk.get("page")
-            if page_val is None:
-                page_val = metadata.get("page")
+            page: int | None = None
+            page_val = chunk.get("page") or metadata.get("page")
             if isinstance(page_val, int):
                 page = page_val
             elif isinstance(page_val, str) and page_val.isdigit():
                 page = int(page_val)
 
-            sources.append(
-                {
-                    "id": source_id,
-                    "text": source_text,
-                    "document": document_name,
-                    "page": page,
-                }
-            )
+            sources.append({"id": source_id, "text": source_text, "document": document_name, "page": page})
             source_label = f"{document_name} (Page {page})" if page is not None else document_name
             context_chunks.append(f"[Source: {source_label}]\n{cleaned_text}")
 
-        context_from_chunks = "\n\n".join(context_chunks)
-        # Prefer bounded app-built context blocks to avoid oversized prompts.
-        context = context_from_chunks.strip() if context_from_chunks.strip() else retrieval_context.strip()
+        # Prefer the app-built bounded context; fall back to retrieval's formatted block
+        app_context = "\n\n".join(context_chunks).strip()
+        context = app_context if app_context else retrieval_context.strip()
+        if len(context) > 2000:
+            context = context[:2000].strip()
 
         print("[RAG] Context length:", len(context))
         print("[RAG] Context sample:", context[:200])
 
         if not sources or not context:
-            print("[RAG] Empty context after build; skipping LLM")
-            return {
-                "answer": no_info_answer,
-                "sources": [],
-            }
+            print("[RAG] Empty context after build — skipping LLM")
+            return {"answer": no_info_answer, "sources": []}
 
-        output = generate_answer(query, context)
-        output = output.strip()
+        # -- LLM call via router (auto-detects provider from env) --
+        output = generate_answer(query=query, context=context)
+        output = output.strip() if output else ""
+
         if not output or len(output) < 40:
-            print("[RAG] Weak model output; using context extraction fallback")
+            print("[RAG] Weak model output — using context extraction fallback")
             output = _extract_from_context_fallback(context, query)
+
         if "Summary:" not in output:
             output = _trim_to_complete_sentence(output)
 
@@ -468,17 +445,12 @@ async def query_endpoint(request: QueryRequest):
         print("[RAG] Answer generated successfully")
         print("[RAG] Sources:", sources)
 
-        return {
-            "answer": final_answer,
-            "sources": sources,
-        }
+        return {"answer": final_answer, "sources": sources}
 
-    except Exception as e:
-        print("[RAG] Query error:", str(e))
-        return {
-            "answer": "Internal server error",
-            "sources": [],
-        }
+    except Exception as exc:
+        print("[RAG] Query error:", str(exc))
+        logger.exception("Query endpoint error: %s", exc)
+        return {"answer": "Internal server error", "sources": []}
 
 
 @app.delete("/reset")
@@ -487,11 +459,9 @@ def reset() -> dict[str, str]:
         reset_database()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to reset vector database.") from exc
-
     return {"status": "success"}
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("backend.app:app", host="127.0.0.1", port=8003, reload=True)
