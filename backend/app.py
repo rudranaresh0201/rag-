@@ -13,10 +13,16 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from db import delete_document, get_all_records, reset_database
-from ingestion import InvalidPDFError, MissingDependencyError, ingest_pdf_file_path
-from llm import generate_answer
-from retrieval import retrieve_chunks
+try:
+    from .db import delete_document, get_all_records, reset_database
+    from .ingestion import InvalidPDFError, MissingDependencyError, ingest_pdf_file_path
+    from .llm import generate_answer
+    from .retrieval import retrieve_chunks
+except ImportError:
+    from db import delete_document, get_all_records, reset_database
+    from ingestion import InvalidPDFError, MissingDependencyError, ingest_pdf_file_path
+    from llm import generate_answer
+    from retrieval import retrieve_chunks
 
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
 logger = logging.getLogger(__name__)
@@ -52,6 +58,11 @@ class QueryResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/")
+def root() -> dict[str, str]:
     return {"status": "ok"}
 
 
@@ -253,7 +264,7 @@ async def query_endpoint(request: QueryRequest):
 
         retrieval = retrieve_chunks(
             query=query,
-            top_k=3,
+            top_k=request.top_k,
             document_id=request.document_id,
         )
         retrieval_context = retrieval.get("context", "")
@@ -377,3 +388,9 @@ def reset() -> dict[str, str]:
         raise HTTPException(status_code=500, detail="Failed to reset vector database.") from exc
 
     return {"status": "success"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("backend.app:app", host="127.0.0.1", port=8003, reload=True)

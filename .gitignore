@@ -28,3 +28,7 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Recovered backup copies
+rag_clean/
+rag_clean.zip

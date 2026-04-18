@@ -5,7 +5,10 @@ from typing import Any, List, TypedDict
 
 from sentence_transformers import SentenceTransformer
 
-from db import get_collection
+try:
+    from .db import get_collection
+except ImportError:
+    from db import get_collection
 
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 IMPORTANT_KEYWORDS = {"formula", "definition", "equation", "value", "law", "theorem", "rate"}

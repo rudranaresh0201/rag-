@@ -22,11 +22,11 @@ def get_client():
     global _client
     if _client is None:
         Path(CHROMA_PATH).mkdir(parents=True, exist_ok=True)
-        _client = chromadb.Client(
-            Settings(
-                persist_directory=CHROMA_PATH,
+        _client = chromadb.PersistentClient(
+            path=CHROMA_PATH,
+            settings=Settings(
                 anonymized_telemetry=False,
-            )
+            ),
         )
     return _client
 

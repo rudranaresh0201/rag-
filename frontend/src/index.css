@@ -1,17 +1,15 @@
-@import url("https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap");
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
-  --bg-main: #ffffff;
-  --panel: #ffffff;
-  --panel-border: #e2e8f0;
-  --text-main: #0f172a;
-  --text-muted: #64748b;
-  --accent: #3b82f6;
-  --accent-2: #8b5cf6;
+  --bg-main: #020617;
+  --text-main: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #4f46e5;
+  --accent-2: #d946ef;
 }
 
 * {
@@ -27,20 +25,26 @@ body,
 
 body {
   margin: 0;
-  font-family: "Sora", sans-serif;
+  font-family: "Manrope", sans-serif;
   background: var(--bg-main);
   color: var(--text-main);
+  background-image:
+    radial-gradient(circle at 15% 15%, rgba(79, 70, 229, 0.18), transparent 34%),
+    radial-gradient(circle at 85% 12%, rgba(217, 70, 239, 0.12), transparent 30%),
+    linear-gradient(140deg, #020617 0%, #0f172a 55%, #111827 100%);
+  background-attachment: fixed;
 }
 
 .glass-card {
-  background: var(--panel);
-  border: 1px solid var(--panel-border);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: 0 20px 45px rgba(2, 6, 23, 0.35);
+  backdrop-filter: blur(16px);
 }
 
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-color: #475569 transparent;
 }
 
 .scrollbar-thin::-webkit-scrollbar {
@@ -52,6 +56,30 @@ body {
 }
 
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #475569;
   border-radius: 999px;
+}
+
+.hero-title {
+  font-family: "Plus Jakarta Sans", sans-serif;
+  letter-spacing: -0.025em;
+}
+
+.type-caret {
+  display: inline-block;
+  width: 0.6ch;
+  margin-left: 0.08rem;
+  border-right: 2px solid rgba(191, 219, 254, 0.95);
+  animation: blink-caret 0.9s step-end infinite;
+}
+
+@keyframes blink-caret {
+  from,
+  to {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0;
+  }
 }

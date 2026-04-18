@@ -1,17 +1,19 @@
 import { motion } from "framer-motion";
-import UploadBox from "./UploadBox";
+import {
+  HiBars3BottomLeft,
+  HiFolder,
+  HiSquares2X2,
+  HiChatBubbleOvalLeftEllipsis,
+  HiMiniSparkles,
+} from "react-icons/hi2";
+import DocumentList from "./DocumentList";
+import FileUpload from "./FileUpload";
 
-const MotionDiv = motion.div;
-
-function formatSize(size) {
-  if (!size && size !== 0) {
-    return "Unknown size";
-  }
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(1)} KB`;
-  }
-  return `${(size / (1024 * 1024)).toFixed(2)} MB`;
-}
+const NAV_ITEMS = [
+  { icon: HiFolder, label: "Documents", active: true },
+  { icon: HiSquares2X2, label: "Collections", active: false },
+  { icon: HiChatBubbleOvalLeftEllipsis, label: "Sessions", active: false },
+];
 
 function Sidebar({
   uploadedFiles,
@@ -23,101 +25,90 @@ function Sidebar({
   onDeleteFile,
   onClearAll,
   clearing,
+  collapsed = false,
+  onToggleCollapsed,
 }) {
-  const navItems = [
-    { label: "Documents", active: true },
-    { label: "Collections", active: false },
-    { label: "Chat History", active: false },
-  ];
-
   return (
-    <aside className="flex h-full flex-col rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-md md:p-5">
-      <h2 className="text-xl font-semibold tracking-tight text-slate-900">Workspace</h2>
-      <p className="mt-1 text-sm text-slate-500">Your AI document workspace.</p>
+    <div className="flex h-full min-h-[600px] flex-col gap-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="inline-flex items-center gap-1 rounded-full border border-indigo-300/30 bg-indigo-500/12 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-100">
+            <HiMiniSparkles />
+            {!collapsed && "Workspace"}
+          </p>
+          {!collapsed && <h2 className="mt-2 text-lg font-semibold text-slate-100">RAG Sidebar</h2>}
+        </div>
 
-      <div className="mt-5">
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Workspace</p>
-        <div className="space-y-1.5">
-          {navItems.map((item) => (
-            <div
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          className="rounded-xl border border-white/15 bg-slate-900/55 p-2 text-slate-200 transition hover:border-indigo-300/50 hover:text-indigo-200"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          <motion.span animate={{ rotate: collapsed ? 180 : 0 }} className="block">
+            <HiBars3BottomLeft />
+          </motion.span>
+        </button>
+      </div>
+
+      <nav className="space-y-1">
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
               key={item.label}
-              className={`rounded-xl px-3 py-2 text-sm transition ${
+              type="button"
+              className={`inline-flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm transition ${
                 item.active
-                  ? "bg-blue-50 text-blue-700 ring-1 ring-blue-100"
-                  : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                  ? "border border-indigo-300/35 bg-indigo-500/15 text-indigo-100"
+                  : "text-slate-300 hover:bg-white/10"
               }`}
             >
-              {item.label}
-            </div>
-          ))}
-        </div>
+              <Icon className="text-base" />
+              {!collapsed && item.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      <FileUpload
+        onUpload={onUpload}
+        uploading={uploading}
+        uploadProgress={uploadProgress}
+        collapsed={collapsed}
+      />
+
+      <div className="scrollbar-thin flex-1 overflow-y-auto pr-1">
+        <DocumentList
+          uploadedFiles={uploadedFiles}
+          activeDocumentId={activeDocumentId}
+          onSelectDocument={onSelectDocument}
+          onDeleteDocument={onDeleteFile}
+          collapsed={collapsed}
+        />
       </div>
 
-      <div className="mt-5">
-        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Actions</p>
-        <UploadBox onUpload={onUpload} uploading={uploading} uploadProgress={uploadProgress} />
+      <div className="space-y-2">
+        <button
+          type="button"
+          onClick={() => onSelectDocument(null)}
+          className="w-full rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-slate-100 transition hover:border-indigo-300/50"
+          title="Search across all documents"
+        >
+          {collapsed ? "All" : "Search All Docs"}
+        </button>
+
+        <button
+          type="button"
+          onClick={onClearAll}
+          disabled={clearing || uploading || uploadedFiles.length === 0}
+          className="w-full rounded-xl border border-fuchsia-300/35 bg-fuchsia-500/12 px-3 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-fuchsia-100 transition hover:bg-fuchsia-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+          title="Clear all documents"
+        >
+          {clearing ? "Clearing..." : collapsed ? "Clear" : "Clear All"}
+        </button>
       </div>
-
-      <div className="scrollbar-thin mt-5 flex-1 space-y-2 overflow-y-auto pr-1">
-        {uploadedFiles.length === 0 && (
-          <div className="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-500">
-            No PDFs uploaded yet.
-          </div>
-        )}
-
-        {uploadedFiles.map((file) => (
-          <MotionDiv
-            key={file.id}
-            whileHover={{ y: -2 }}
-            className={`group rounded-xl border bg-white p-3 transition hover:border-blue-200 hover:shadow-md ${
-              activeDocumentId === file.id
-                ? "border-blue-300 ring-2 ring-blue-100"
-                : "border-slate-200"
-            }`}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <button
-                type="button"
-                onClick={() => onSelectDocument(file.id)}
-                className="min-w-0 flex-1 text-left"
-              >
-                <p className="line-clamp-1 text-sm font-medium text-slate-800">{file.name}</p>
-                <p className="mt-1 text-xs text-slate-500">{formatSize(file.size)}</p>
-              </button>
-              <div className="flex items-center gap-1">
-                {activeDocumentId === file.id && (
-                  <span className="h-2 w-2 rounded-full bg-blue-500" />
-                )}
-                <button
-                  type="button"
-                  onClick={() => onDeleteFile(file.id)}
-                  className="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-500"
-                >
-                  Delete
-                </button>
-              </div>
-            </div>
-          </MotionDiv>
-        ))}
-      </div>
-
-      <button
-        type="button"
-        onClick={() => onSelectDocument(null)}
-        className="mb-2 mt-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
-      >
-        Search Across All Documents
-      </button>
-
-      <button
-        type="button"
-        onClick={onClearAll}
-        disabled={clearing || uploading || uploadedFiles.length === 0}
-        className="mt-2 rounded-xl border border-violet-200 bg-white px-3 py-2 text-sm font-medium text-violet-600 transition hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-45"
-      >
-        {clearing ? "Clearing..." : "Clear All"}
-      </button>
-    </aside>
+    </div>
   );
 }
 

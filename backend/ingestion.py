@@ -11,8 +11,12 @@ try:
 except ImportError:
     fitz = None
 
-from db import embed_texts, get_collection
-from utils import chunk_text, clean_text
+try:
+    from .db import embed_texts, get_collection
+    from .utils import chunk_text, clean_text
+except ImportError:
+    from db import embed_texts, get_collection
+    from utils import chunk_text, clean_text
 
 logger = logging.getLogger(__name__)
 
