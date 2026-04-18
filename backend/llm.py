@@ -20,18 +20,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 MODEL_NAME = os.getenv("TINYLLAMA_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 GENERATION_MAX_TIME = float(os.getenv("LLM_MAX_TIME_SECONDS", "45"))
 PROMPT = """
-You are an academic assistant.
+You are an AI assistant.
 
-Answer using ONLY the provided context.
+You are given context extracted from documents.
 
-Structure:
-1. Short summary (2-3 lines)
-2. Key points (bullet points)
+Your job is to EXTRACT and EXPLAIN the answer from this context.
 
-Guidelines:
-- Be clear and factual
-- Use simple academic language
-- Do NOT repeat the context
+Rules:
+- DO NOT decide whether context is relevant
+- ALWAYS try to extract useful information from context
+- Use whatever information is available
+- Only say 'Insufficient information' if context is completely empty
+
+Return your answer in exactly this format:
+Summary:
+<concise answer>
+
+Key Points:
+- <point 1>
+- <point 2>
+
+Explanation:
+<detailed explanation grounded in the provided context>
 
 Context:
 {context}
@@ -111,24 +121,32 @@ def generate_answer(query: str, context: str) -> str:
     try:
         logger.info("LLM call query=%s", query)
         logger.info("LLM context_preview=%s", context[:200])
+        print("[RAG] Sending to LLM...")
 
         if not context.strip():
             print("FINAL ANSWER READY")
-            return "No relevant information found in the provided document."
+            return ""
 
         prompt = _build_prompt(query=query, context=context)
         tokenizer, model = _get_model_and_tokenizer()
 
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1500,
+        )
         logger.info("LLM prompt_length=%s", len(prompt))
         logger.info("LLM token_count=%s", inputs["input_ids"].shape[-1])
 
         outputs = model.generate(
             input_ids=inputs["input_ids"],
             attention_mask=inputs.get("attention_mask"),
-            max_new_tokens=250,
+            max_new_tokens=380,
             do_sample=False,
-            temperature=0.2,
+            repetition_penalty=1.08,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id,
             max_time=GENERATION_MAX_TIME,
         )
 
@@ -138,17 +156,23 @@ def generate_answer(query: str, context: str) -> str:
         print("=== RAW MODEL OUTPUT ===")
         print(output)
 
-        answer = output.replace("\n\n", "\n").strip()
+        answer = output.replace("\r", "").strip()
+        answer = re.sub(r"\n{3,}", "\n\n", answer)
+        answer = answer.replace("\u0000", "").strip()
+
+        # Drop obvious prompt-echo artifacts if present.
+        answer = re.sub(r"(?is)^.*?Summary:\s*", "Summary:\n", answer) if "Summary:" in answer else answer
 
         print("CLEAN ANSWER:", answer)
         print("FINAL ANSWER:", answer)
+        print("[RAG] Raw LLM output length:", len(answer))
 
         logger.info("LLM output_length=%s", len(answer))
 
-        if not answer or len(answer.strip()) < 10:
-            print("WARNING: Empty or weak output")
+        if not answer:
+            print("WARNING: Empty output")
             print("FINAL ANSWER READY")
-            return "No relevant information found in the provided document."
+            return ""
 
         print("FINAL ANSWER READY")
         return answer
@@ -156,4 +180,4 @@ def generate_answer(query: str, context: str) -> str:
         logger.exception("LLM generation failed: %s", exc)
         print("GENERATION ERROR:", exc)
         print("FINAL ANSWER READY")
-        return "Error generating response"
+        return ""

@@ -56,6 +56,130 @@ class QueryResponse(BaseModel):
     sources: List[SourceItem]
 
 
+def _trim_to_complete_sentence(text: str) -> str:
+    value = " ".join(str(text).split()).strip()
+    if not value:
+        return ""
+
+    matches = list(re.finditer(r"[.!?]", value))
+    if matches:
+        last_end = matches[-1].end()
+        value = value[:last_end].strip()
+
+    return value
+
+
+def _build_structured_answer(raw_output: str, query: str, sources: List[dict[str, Any]]) -> str:
+    fallback = "Information extracted from provided context."
+    text = str(raw_output or "").replace("\r", "").strip()
+
+    summary = ""
+    explanation = ""
+    key_points: list[str] = []
+
+    summary_match = re.search(r"(?is)summary\s*:\s*(.*?)(?:\n\s*key points\s*:|$)", text)
+    points_match = re.search(r"(?is)key points\s*:\s*(.*?)(?:\n\s*explanation\s*:|$)", text)
+    explanation_match = re.search(r"(?is)explanation\s*:\s*(.*?)(?:\n\s*sources\s*:|$)", text)
+
+    if summary_match:
+        summary = _trim_to_complete_sentence(summary_match.group(1))
+    if explanation_match:
+        explanation = _trim_to_complete_sentence(explanation_match.group(1))
+
+    if points_match:
+        for line in points_match.group(1).split("\n"):
+            cleaned = line.strip().lstrip("-*").strip()
+            if cleaned:
+                key_points.append(_trim_to_complete_sentence(cleaned) or cleaned)
+
+    if not summary:
+        sentence_candidates = re.split(r"(?<=[.!?])\s+", _trim_to_complete_sentence(text))
+        summary = sentence_candidates[0].strip() if sentence_candidates and sentence_candidates[0].strip() else ""
+
+    if not explanation:
+        explanation = _trim_to_complete_sentence(text)
+
+    if not key_points:
+        sentence_candidates = [
+            segment.strip()
+            for segment in re.split(r"(?<=[.!?])\s+", text)
+            if len(segment.strip()) > 20
+        ]
+        key_points = [
+            _trim_to_complete_sentence(segment) or segment
+            for segment in sentence_candidates[:3]
+        ]
+
+    summary = summary or fallback
+    explanation = explanation or fallback
+    key_points = [point for point in key_points if point]
+    if not key_points:
+        key_points = [fallback]
+
+    sources_list = "\n".join(
+        f"- [{source['id']}] {source['document']}"
+        + (f" (Page {source['page']})" if source.get("page") else "")
+        for source in sources
+    )
+
+    return (
+        "Summary:\n"
+        f"{summary}\n\n"
+        "Key Points:\n"
+        + "\n".join(f"- {point}" for point in key_points[:5])
+        + "\n\n"
+        "Explanation:\n"
+        f"{explanation}\n\n"
+        "Sources:\n"
+        f"{sources_list}"
+    )
+
+
+def _extract_from_context_fallback(context: str, query: str) -> str:
+    normalized = " ".join(str(context).split()).strip()
+    if not normalized:
+        return ""
+
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", normalized) if segment.strip()]
+    if not sentences:
+        return normalized[:1200]
+
+    query_terms = {
+        token
+        for token in re.findall(r"[a-zA-Z0-9]+", query.lower())
+        if len(token) > 2
+    }
+
+    ranked_sentences: list[tuple[int, str]] = []
+    for sentence in sentences:
+        sentence_terms = {
+            token
+            for token in re.findall(r"[a-zA-Z0-9]+", sentence.lower())
+            if len(token) > 2
+        }
+        overlap = len(query_terms & sentence_terms)
+        ranked_sentences.append((overlap, sentence))
+
+    ranked_sentences.sort(key=lambda item: item[0], reverse=True)
+    extracted = [item[1] for item in ranked_sentences if item[0] > 0][:4]
+    if not extracted:
+        extracted = sentences[:4]
+
+    summary = extracted[0]
+    key_points = extracted[:3]
+    explanation = " ".join(extracted)
+
+    return (
+        "Summary:\n"
+        f"{summary}\n\n"
+        "Key Points:\n"
+        + "\n".join(f"- {item}" for item in key_points)
+        + "\n\n"
+        "Explanation:\n"
+        f"{explanation}"
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -240,50 +364,27 @@ def delete_single_document(id: str) -> dict[str, str]:
 @app.post("/query")
 async def query_endpoint(request: QueryRequest):
     try:
-        no_info_answer = "No relevant information found in the provided document."
+        no_info_answer = "Insufficient information in provided documents."
         query = request.query
 
-        def normalize_answer(text: str) -> str:
-            normalized = str(text).strip()
-
-            if "Answer:" in normalized:
-                normalized = normalized.split("Answer:")[-1]
-
-            if "-" not in normalized:
-                sentences = re.split(r"(?<=[.!?]) +", normalized)
-                bullets = []
-                for sentence in sentences[:4]:
-                    sentence = sentence.strip()
-                    if len(sentence) > 20:
-                        bullets.append("- " + sentence)
-                return "\n".join(bullets)
-
-            return normalized
-
-        print("QUERY RECEIVED:", query)
+        print("[RAG] Query received:", query)
 
         retrieval = retrieve_chunks(
             query=query,
             top_k=request.top_k,
             document_id=request.document_id,
         )
-        retrieval_context = retrieval.get("context", "")
+        retrieval_context = str(retrieval.get("context", "") or "")
 
-        print("CONTEXT LENGTH:", len(retrieval_context))
-
-        # FORCE SAFE EXECUTION
-        if not retrieval_context or len(retrieval_context.strip()) == 0:
-            print("EMPTY CONTEXT")
+        raw_chunks = retrieval.get("chunks", [])
+        if not raw_chunks:
             return {
                 "answer": no_info_answer,
                 "sources": [],
             }
-
-        print("CALLING GENERATE ANSWER")
-
-        raw_chunks = retrieval.get("chunks", [])
         seen_chunk_texts: set[str] = set()
         top_chunks: list[dict[str, Any]] = []
+        max_chunks = max(3, min(request.top_k, 6))
 
         for chunk in raw_chunks:
             if not isinstance(chunk, dict):
@@ -294,7 +395,7 @@ async def query_endpoint(request: QueryRequest):
                 continue
             seen_chunk_texts.add(normalized)
             top_chunks.append(chunk)
-            if len(top_chunks) >= 3:
+            if len(top_chunks) >= max_chunks:
                 break
 
         sources = []
@@ -305,14 +406,14 @@ async def query_endpoint(request: QueryRequest):
                 continue
 
             raw_text = str(chunk.get("text", ""))
-            cleaned_text = raw_text.replace("\n", " ").strip()[:700]
+            cleaned_text = " ".join(raw_text.split()).strip()[:1600]
             if not cleaned_text:
                 continue
 
             source_id = len(sources) + 1
 
-            source_text = cleaned_text[:200].strip()
-            if len(cleaned_text) > 200:
+            source_text = cleaned_text[:260].strip()
+            if len(cleaned_text) > 260:
                 source_text += "..."
 
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
@@ -337,35 +438,35 @@ async def query_endpoint(request: QueryRequest):
                     "page": page,
                 }
             )
-            context_chunks.append(f"[{source_id}] {cleaned_text}")
+            source_label = f"{document_name} (Page {page})" if page is not None else document_name
+            context_chunks.append(f"[Source: {source_label}]\n{cleaned_text}")
 
-        context = "\n\n".join(context_chunks[:3])
+        context_from_chunks = "\n\n".join(context_chunks)
+        # Prefer bounded app-built context blocks to avoid oversized prompts.
+        context = context_from_chunks.strip() if context_from_chunks.strip() else retrieval_context.strip()
 
-        if not sources or not context.strip():
+        print("[RAG] Context length:", len(context))
+        print("[RAG] Context sample:", context[:200])
+
+        if not sources or not context:
+            print("[RAG] Empty context after build; skipping LLM")
             return {
                 "answer": no_info_answer,
                 "sources": [],
             }
 
         output = generate_answer(query, context)
-        output = normalize_answer(output)
+        output = output.strip()
+        if not output or len(output) < 40:
+            print("[RAG] Weak model output; using context extraction fallback")
+            output = _extract_from_context_fallback(context, query)
+        if "Summary:" not in output:
+            output = _trim_to_complete_sentence(output)
 
-        print("FINAL ANSWER:", output)
+        final_answer = _build_structured_answer(output, query, sources)
 
-        if len(output.strip()) < 20:
-            return {
-                "answer": no_info_answer,
-                "sources": sources,
-            }
-
-        sources_list = "\n".join(
-            f"[{source['id']}] {source['document']}"
-            + (f" • Page {source['page']}" if source.get("page") else "")
-            for source in sources
-        )
-        final_answer = output + "\n\nSources:\n" + sources_list
-
-        print("SENDING TO FRONTEND:", final_answer)
+        print("[RAG] Answer generated successfully")
+        print("[RAG] Sources:", sources)
 
         return {
             "answer": final_answer,
@@ -373,7 +474,7 @@ async def query_endpoint(request: QueryRequest):
         }
 
     except Exception as e:
-        print("QUERY ERROR:", str(e))
+        print("[RAG] Query error:", str(e))
         return {
             "answer": "Internal server error",
             "sources": [],
