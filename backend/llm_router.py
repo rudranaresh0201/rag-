@@ -24,39 +24,51 @@ logger = logging.getLogger(__name__)
 # Shared prompt
 # ---------------------------------------------------------------------------
 _PROMPT_TEMPLATE = """\
-You are an AI assistant. You are given context extracted from documents.
+You are a highly reliable AI assistant designed for Retrieval-Augmented Generation (RAG).
 
-Your job is to EXTRACT and EXPLAIN the answer from this context.
+Your job is to answer the user question using ONLY the provided context.
 
-Rules:
-- DO NOT decide whether context is relevant
-- ALWAYS try to extract useful information from context
-- Use whatever information is available
-- Only say 'Insufficient information' if context is completely empty
+========================
+CONTEXT:
+{context}
+========================
 
-Return your answer in exactly this format:
-Summary:
-<concise answer>
+QUESTION:
+{query}
+
+========================
+STRICT RULES:
+
+1. Use ONLY relevant information from the context.
+2. If context is noisy or irrelevant, IGNORE irrelevant parts.
+3. If no useful information is found, respond EXACTLY:
+    "Insufficient relevant information found in the provided documents."
+4. NEVER output single letters, symbols, or incomplete answers.
+5. ALWAYS generate a complete, meaningful explanation.
+6. Keep answer concise but informative (5-8 lines max).
+
+========================
+OUTPUT FORMAT (MANDATORY):
+
+Answer:
+<clear explanation in simple terms>
 
 Key Points:
 - <point 1>
 - <point 2>
+- <point 3>
 
-Explanation:
-<detailed explanation grounded in the provided context>
+Confidence:
+- High / Medium / Low
 
-Context:
-{context}
+========================
 
-Question:
-{question}
-
-Answer:
+Now generate the BEST possible answer.
 """
 
 
 def _build_prompt(query: str, context: str) -> str:
-    return _PROMPT_TEMPLATE.format(context=context, question=query)
+    return _PROMPT_TEMPLATE.format(context=context[:2000], query=query)
 
 
 # ---------------------------------------------------------------------------

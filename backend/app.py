@@ -10,16 +10,19 @@ Changes from previous version:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import tempfile
+import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Iterator, List
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -37,6 +40,7 @@ MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PDF RAG Backend", version="2.0.0")
+_generation_lock = asyncio.Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -199,6 +203,48 @@ def _extract_from_context_fallback(context: str, query: str) -> str:
     )
 
 
+def normalize_response(answer: str, query: str) -> str:
+    if not answer or len(answer.strip()) < 15:
+        return "Insufficient relevant information found in the provided documents."
+
+    # Ensure required sections exist
+    if "Answer:" not in answer:
+        answer = f"Answer:\n{answer.strip()}\n"
+
+    if "Key Points:" not in answer:
+        answer += "\nKey Points:\n- Information extracted from context\n- Based on retrieved documents\n- May require better context for depth\n"
+
+    if "Confidence:" not in answer:
+        answer += "\nConfidence:\n- Medium\n"
+
+    return answer
+
+
+def _stream_text_chunks(text: str, words_per_chunk: int = 6, delay: float = 0.05) -> Iterator[str]:
+    words = text.split()
+    if not words:
+        return
+    for index in range(0, len(words), words_per_chunk):
+        chunk = " ".join(words[index:index + words_per_chunk])
+        if index + words_per_chunk < len(words):
+            chunk += " "
+        yield chunk
+        time.sleep(delay)
+
+
+def _extract_sections_for_stream(answer: str) -> tuple[str, str, str]:
+    text = str(answer or "")
+    summary_match = re.search(r"(?is)summary\s*:\s*(.*?)(?:\n\s*key points\s*:|$)", text)
+    points_match = re.search(r"(?is)key points\s*:\s*(.*?)(?:\n\s*explanation\s*:|$)", text)
+    explanation_match = re.search(r"(?is)explanation\s*:\s*(.*?)(?:\n\s*sources\s*:|$)", text)
+
+    summary = summary_match.group(1).strip() if summary_match else ""
+    key_points = points_match.group(1).strip() if points_match else ""
+    explanation = explanation_match.group(1).strip() if explanation_match else ""
+
+    return summary, key_points, explanation
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -351,6 +397,7 @@ async def query_endpoint(request: QueryRequest):
     try:
         no_info_answer = "Insufficient information in provided documents."
         query = request.query
+        print("[RAG] Query start")
         print("[RAG] Query received:", query)
 
         # -- Retrieval (multi-query + rerank + dedup + keyword guarantee) --
@@ -429,18 +476,17 @@ async def query_endpoint(request: QueryRequest):
             print("[RAG] Empty context after build — skipping LLM")
             return {"answer": no_info_answer, "sources": []}
 
-        # -- LLM call via router (auto-detects provider from env) --
-        output = generate_answer(query=query, context=context)
-        output = output.strip() if output else ""
+        # Queue generation so only one request runs model inference at a time.
+        async with _generation_lock:
+            # -- LLM call via router (auto-detects provider from env) --
+            output = generate_answer(query=query, context=context)
+            output = output.strip() if output else ""
 
-        if not output or len(output) < 40:
-            print("[RAG] Weak model output — using context extraction fallback")
+        if not output:
+            print("[RAG] Empty model output — using context extraction fallback")
             output = _extract_from_context_fallback(context, query)
 
-        if "Summary:" not in output:
-            output = _trim_to_complete_sentence(output)
-
-        final_answer = _build_structured_answer(output, query, sources)
+        final_answer = normalize_response(output, query)
 
         print("[RAG] Answer generated successfully")
         print("[RAG] Sources:", sources)
@@ -451,6 +497,120 @@ async def query_endpoint(request: QueryRequest):
         print("[RAG] Query error:", str(exc))
         logger.exception("Query endpoint error: %s", exc)
         return {"answer": "Internal server error", "sources": []}
+
+
+@app.post("/query_stream")
+async def query_stream_endpoint(request: QueryRequest):
+    try:
+        no_info_answer = "Insufficient information in provided documents."
+        query = request.query
+        print("[RAG] Query start")
+        print("[RAG] Query received:", query)
+
+        retrieval = retrieve_chunks(
+            query=query,
+            top_k=request.top_k,
+            document_id=request.document_id,
+        )
+
+        raw_chunks = retrieval.get("chunks", [])
+        retrieval_context = str(retrieval.get("context", "") or "")
+
+        if not raw_chunks:
+            def no_info_stream() -> Iterator[str]:
+                print("[RAG] Streaming response started")
+                yield no_info_answer
+
+            return StreamingResponse(no_info_stream(), media_type="text/plain")
+
+        seen_texts: set[str] = set()
+        top_chunks: list[dict[str, Any]] = []
+        max_chunks = 3
+
+        for chunk in raw_chunks:
+            if not isinstance(chunk, dict):
+                continue
+            raw_text = str(chunk.get("text", ""))
+            normalized = " ".join(raw_text.split()).strip().lower()
+            if not normalized or normalized in seen_texts:
+                continue
+            seen_texts.add(normalized)
+            top_chunks.append(chunk)
+            if len(top_chunks) >= max_chunks:
+                break
+
+        sources: list[dict[str, Any]] = []
+        context_chunks: list[str] = []
+
+        for chunk in top_chunks:
+            if not isinstance(chunk, dict):
+                continue
+
+            raw_text = str(chunk.get("text", ""))
+            cleaned_text = " ".join(raw_text.split()).strip()[:500]
+            if not cleaned_text:
+                continue
+
+            source_id = len(sources) + 1
+            source_text = cleaned_text[:260].strip()
+            if len(cleaned_text) > 260:
+                source_text += "..."
+
+            metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+            file_name = str(chunk.get("file", "")).strip() or str(metadata.get("file", "")).strip()
+            document_name = Path(file_name).name if file_name else "Uploaded Doc"
+
+            page: int | None = None
+            page_val = chunk.get("page") or metadata.get("page")
+            if isinstance(page_val, int):
+                page = page_val
+            elif isinstance(page_val, str) and page_val.isdigit():
+                page = int(page_val)
+
+            sources.append({"id": source_id, "text": source_text, "document": document_name, "page": page})
+            source_label = f"{document_name} (Page {page})" if page is not None else document_name
+            context_chunks.append(f"[Source: {source_label}]\n{cleaned_text}")
+
+        app_context = "\n\n".join(context_chunks).strip()
+        context = app_context if app_context else retrieval_context.strip()
+        if len(context) > 2000:
+            context = context[:2000].strip()
+
+        print("[RAG] Context length:", len(context))
+        print("[RAG] Context sample:", context[:200])
+
+        if not sources or not context:
+            def no_context_stream() -> Iterator[str]:
+                print("[RAG] Streaming response started")
+                yield no_info_answer
+
+            return StreamingResponse(no_context_stream(), media_type="text/plain")
+
+        async with _generation_lock:
+            output = generate_answer(query=query, context=context)
+            output = output.strip() if output else ""
+
+        if not output:
+            print("[RAG] Empty model output — using context extraction fallback")
+            output = _extract_from_context_fallback(context, query)
+
+        final_answer = normalize_response(output, query)
+
+        def stream_generator() -> Iterator[str]:
+            print("[RAG] Streaming response started")
+            for chunk in _stream_text_chunks(final_answer):
+                yield chunk
+
+        return StreamingResponse(stream_generator(), media_type="text/plain")
+    except Exception as exc:
+        print("[RAG] Query stream error:", str(exc))
+        logger.exception("Query stream endpoint error: %s", exc)
+
+        def error_stream() -> Iterator[str]:
+            print("[RAG] Streaming response started")
+            yield "Internal server error"
+
+        return StreamingResponse(error_stream(), media_type="text/plain")
 
 
 @app.delete("/reset")

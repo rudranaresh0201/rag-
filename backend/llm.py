@@ -20,8 +20,8 @@ from typing import Any
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_NAME = os.getenv("TINYLLAMA_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-GENERATION_MAX_TIME = float(os.getenv("LLM_MAX_TIME_SECONDS", "45"))
-SECTION_TIMEOUT_SECONDS = 10.0
+GENERATION_MAX_TIME = float(os.getenv("LLM_MAX_TIME_SECONDS", "20"))
+SECTION_TIMEOUT_SECONDS = 20.0
 FAST_MODE = os.getenv("FAST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
 FALLBACK_EXPLANATION = (
     "The tractive system in a BAJA EV consists of a battery pack, AIRs (Accumulator Isolation Relays), "
@@ -58,6 +58,49 @@ Context:
 Section Output ({section_name} only):
 """
 
+PROMPT = """
+You are a highly reliable AI assistant designed for Retrieval-Augmented Generation (RAG).
+
+Your job is to answer the user question using ONLY the provided context.
+
+========================
+CONTEXT:
+{context}
+========================
+
+QUESTION:
+{query}
+
+========================
+STRICT RULES:
+
+1. Use ONLY relevant information from the context.
+2. If context is noisy or irrelevant, IGNORE irrelevant parts.
+3. If no useful information is found, respond EXACTLY:
+    "Insufficient relevant information found in the provided documents."
+4. NEVER output single letters, symbols, or incomplete answers.
+5. ALWAYS generate a complete, meaningful explanation.
+6. Keep answer concise but informative (5-8 lines max).
+
+========================
+OUTPUT FORMAT (MANDATORY):
+
+Answer:
+<clear explanation in simple terms>
+
+Key Points:
+- <point 1>
+- <point 2>
+- <point 3>
+
+Confidence:
+- High / Medium / Low
+
+========================
+
+Now generate the BEST possible answer.
+"""
+
 _tokenizer: Any | None = None
 _model: Any | None = None
 logger = logging.getLogger(__name__)
@@ -92,13 +135,7 @@ def _assert_cache_is_d_drive() -> None:
             print(f"Warning: cache path not on D drive: {key} -> {value}")
 
 def _build_prompt(query: str, context: str) -> str:
-    # Backward-compatible wrapper; sectioned generation uses _build_section_prompt.
-    return _build_section_prompt(
-        query=query,
-        context=context,
-        section_name="General",
-        section_instruction="Answer clearly.",
-    )
+    return PROMPT.format(context=context[:2000], query=query)
 
 
 def _build_section_prompt(
@@ -592,6 +629,9 @@ def _get_model_and_tokenizer() -> tuple[Any, Any]:
         except Exception as exc:
             logger.exception("Model load failed: %s", exc)
             raise RuntimeError("LLM failed to load") from exc
+    else:
+        print("[RAG] Model already loaded")
+        print("[RAG] Model reused")
 
     if _tokenizer is None or _model is None:
         raise RuntimeError("LLM failed to load")
@@ -602,9 +642,9 @@ def _get_model_and_tokenizer() -> tuple[Any, Any]:
 def generate_answer(query: str, context: str) -> str:
     try:
         generation_started = time.perf_counter()
-        timeout_triggered = False
         logger.info("LLM call query=%s", query)
         logger.info("LLM context_preview=%s", context[:200])
+        print("[RAG] Query start")
         print("[RAG] Sending to LLM...")
 
         if not context.strip():
@@ -615,121 +655,37 @@ def generate_answer(query: str, context: str) -> str:
         logger.info("LLM cleaned_context_length=%s", len(cleaned_context))
         tokenizer, model = _get_model_and_tokenizer()
 
-        summary_prompt = _build_section_prompt(
-            query=query,
-            context=cleaned_context,
-            section_name="Summary",
-            section_instruction="Explain concept in 2 lines. High-level only.",
+        prompt = _build_prompt(query=query, context=cleaned_context)
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1500,
         )
-        summary_raw = _generate_section_text(
-            tokenizer=tokenizer,
-            model=model,
-            prompt=summary_prompt,
-            max_new_tokens=50,
+        logger.info("LLM prompt_length=%s", len(prompt))
+        logger.info("LLM token_count=%s", inputs["input_ids"].shape[-1])
+
+        outputs = model.generate(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            max_new_tokens=380,
+            do_sample=False,
+            repetition_penalty=1.08,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id,
+            max_time=GENERATION_MAX_TIME,
         )
-        summary_raw_text, summary_timeout = summary_raw
-        timeout_triggered = timeout_triggered or summary_timeout
-        print("=== RAW SUMMARY OUTPUT ===")
-        print(summary_raw_text)
-        summary = _normalize_summary(summary_raw_text)
 
-        if summary_timeout or len(summary.strip()) < 10:
-            answer = _build_fast_fallback(query=query, include_explanation=True)
-            elapsed = time.perf_counter() - generation_started
-            print(f"[RAG] Generation time: {elapsed:.2f} sec")
-            print("[RAG] Timeout triggered:", True)
-            print("FINAL ANSWER READY")
-            return answer
+        prompt_token_count = inputs["input_ids"].shape[-1]
+        generated_tokens = outputs[0][prompt_token_count:]
+        output = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        print("=== RAW MODEL OUTPUT ===")
+        print(output)
 
-        key_points_prompt = _build_section_prompt(
-            query=query,
-            context=cleaned_context,
-            section_name="Key Points",
-            section_instruction="List 3–4 conceptual bullet points. No sentences from context.",
-            avoid_text=f"Summary:\n{summary}",
-        )
-        key_points_raw = _generate_section_text(
-            tokenizer=tokenizer,
-            model=model,
-            prompt=key_points_prompt,
-            max_new_tokens=80,
-        )
-        key_points_raw_text, key_points_timeout = key_points_raw
-        timeout_triggered = timeout_triggered or key_points_timeout
-        print("=== RAW KEY POINTS OUTPUT ===")
-        print(key_points_raw_text)
-        key_points = _normalize_key_points(key_points_raw_text)
+        answer = _clean_generated_answer(output)
+        answer = re.sub(r"(?is)^.*?Summary:\s*", "Summary:\n", answer) if "Summary:" in answer else answer
 
-        if key_points_timeout or not key_points:
-            answer = _build_fast_fallback(query=query, include_explanation=True)
-            elapsed = time.perf_counter() - generation_started
-            print(f"[RAG] Generation time: {elapsed:.2f} sec")
-            print("[RAG] Timeout triggered:", True)
-            print("FINAL ANSWER READY")
-            return answer
-
-        if FAST_MODE:
-            explanation = _ensure_explanation_quality(summary, "")
-            answer = _format_sections(summary, key_points[:4], explanation)
-            if len(answer.strip()) < 10:
-                answer = _build_fast_fallback(query=query, include_explanation=True)
-
-            elapsed = time.perf_counter() - generation_started
-            print(f"[RAG] Generation time: {elapsed:.2f} sec")
-            print("[RAG] Timeout triggered:", timeout_triggered)
-            print("CLEAN ANSWER:", answer)
-            print("FINAL ANSWER:", answer)
-            print("[RAG] Raw LLM output length:", len(answer))
-            print("FINAL ANSWER READY")
-            return answer
-
-        explanation_prompt = _build_section_prompt(
-            query=query,
-            context=cleaned_context,
-            section_name="Explanation",
-            section_instruction="Explain step-by-step like teaching. Avoid repeating summary or bullets.",
-            avoid_text=(
-                "Summary:\n"
-                f"{summary}\n\n"
-                "Key Points:\n"
-                + "\n".join(f"- {point}" for point in key_points)
-            ),
-        )
-        explanation_raw = _generate_section_text(
-            tokenizer=tokenizer,
-            model=model,
-            prompt=explanation_prompt,
-            max_new_tokens=120,
-        )
-        explanation_raw_text, explanation_timeout = explanation_raw
-        timeout_triggered = timeout_triggered or explanation_timeout
-        print("=== RAW EXPLANATION OUTPUT ===")
-        print(explanation_raw_text)
-        explanation = _normalize_explanation(explanation_raw_text)
-        explanation = _ensure_explanation_quality(summary, explanation)
-
-        if explanation_timeout or len(explanation.strip()) < 10:
-            answer = _build_fast_fallback(query=query, include_explanation=True)
-            elapsed = time.perf_counter() - generation_started
-            print(f"[RAG] Generation time: {elapsed:.2f} sec")
-            print("[RAG] Timeout triggered:", True)
-            print("FINAL ANSWER READY")
-            return answer
-
-        summary, key_points, explanation = _cross_check_sections(
-            summary=summary,
-            key_points=key_points,
-            explanation=explanation,
-            context=cleaned_context,
-        )
-        explanation = _ensure_explanation_quality(summary, explanation)
-
-        answer = _format_sections(summary, key_points, explanation)
-
-        if _long_phrase_overlap(answer, cleaned_context):
-            answer = _build_distinct_fallback(cleaned_context, query)
-
-        if not answer or len(answer.strip()) < 10:
+        if not answer.strip():
             answer = _build_fast_fallback(query=query, include_explanation=True)
 
         print("CLEAN ANSWER:", answer)
@@ -737,14 +693,8 @@ def generate_answer(query: str, context: str) -> str:
         print("[RAG] Raw LLM output length:", len(answer))
         elapsed = time.perf_counter() - generation_started
         print(f"[RAG] Generation time: {elapsed:.2f} sec")
-        print("[RAG] Timeout triggered:", timeout_triggered)
 
         logger.info("LLM output_length=%s", len(answer))
-
-        if not answer:
-            print("WARNING: Empty output")
-            print("FINAL ANSWER READY")
-            return ""
 
         print("FINAL ANSWER READY")
         return answer
@@ -752,7 +702,8 @@ def generate_answer(query: str, context: str) -> str:
         logger.exception("LLM generation failed: %s", exc)
         print("GENERATION ERROR:", exc)
         answer = _build_fast_fallback(query=query, include_explanation=True)
-        print("[RAG] Timeout triggered:", True)
+        elapsed = time.perf_counter() - generation_started
+        print(f"[RAG] Generation time: {elapsed:.2f} sec")
         print("FINAL ANSWER READY")
         return answer
 
