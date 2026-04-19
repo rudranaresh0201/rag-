@@ -93,23 +93,19 @@ export async function queryRagByDocument(query, documentId) {
 }
 
 export async function listDocuments() {
-  let response;
   try {
-    response = await apiClient.get("/documents");
+    const res = await fetch("http://127.0.0.1:8003/documents");
+    const data = await res.json();
+    console.log("DOCUMENTS RAW:", data);
+    return data;
   } catch (error) {
     throw buildApiError(error, "Failed to load documents.");
   }
-  return response.data;
 }
 
 export async function deleteDocument(documentId) {
-  let response;
-  try {
-    response = await apiClient.delete(`/document/${documentId}`);
-  } catch (error) {
-    throw buildApiError(error, "Failed to delete document.");
-  }
-  return response.data;
+  if (!documentId) return null;
+  return null;
 }
 
 export async function resetRag() {

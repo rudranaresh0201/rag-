@@ -5,12 +5,9 @@ from typing import Any, List, TypedDict
 
 from sentence_transformers import SentenceTransformer
 
-try:
-    from .db import get_collection
-except ImportError:
-    from db import get_collection
+from .db import get_collection, get_embedder
 
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 _embed_model: SentenceTransformer | None = None
 CONCEPT_KEYWORDS = {"system", "works", "mechanism", "function", "flow", "control"}
 NOISE_MARKERS = {"page", "figure", "table", "rev"}
@@ -18,6 +15,9 @@ RULEBOOK_TERMS = {
     "shall", "must", "required", "requirements", "rule", "rules", "compliance", "inspection", "team", "teams",
 }
 TEACHING_TERMS = {"explains", "means", "works", "because", "therefore", "allows", "used", "process", "mechanism"}
+EXPLANATORY_VERBS = {"is", "are", "uses", "converts", "maps", "explains", "works", "operates"}
+DEFINITION_PATTERNS = (" is a ", " refers to ", " defined as ")
+INSTRUCTION_MARKERS = {"verify", "note that", "question", "name", "compare", "identify"}
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "did", "do", "does",
     "for", "from", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "of", "on",
@@ -25,6 +25,29 @@ STOPWORDS = {
     "this", "to", "us", "was", "we", "what", "when", "where", "which", "who", "why", "with", "would",
     "you", "your", "explain", "describe", "give", "about",
 }
+KEYWORD_MIN_LEN = 4
+KEYWORD_VARIANTS = {
+    "quantisation": "quantization",
+    "colour": "color",
+    "behaviour": "behavior",
+}
+KEYWORD_SYNONYMS = {
+    "sampling": ["sampling", "sample"],
+    "quantization": ["quantization", "quantisation"],
+    "encoding": ["encoding", "encode"],
+}
+CORE_TERM_STOPWORDS = {
+    "and", "or", "the", "a", "an", "what", "how", "explain", "describe", "about", "theorem",
+}
+NON_CONTENT_QUERY_WORDS = {
+    "what", "is", "the", "explain", "story", "describe", "moral",
+}
+GENERIC_QUERY_WORDS = {"system", "explain", "what", "how"}
+GENERIC_MATCH_WORDS = {
+    "system", "control", "data", "process", "method", "model", "design", "working", "overview",
+}
+DOMAIN_QUERY_TRIGGERS = {"vehicle", "electric", "battery", "motor", "tractive"}
+DOMAIN_BOOST_TERMS = {"ev", "baja", "vehicle", "battery", "motor"}
 
 
 class RetrievedChunk(TypedDict):
@@ -38,6 +61,224 @@ class RetrievedChunk(TypedDict):
 class RetrievalResult(TypedDict):
     chunks: List[RetrievedChunk]
     context: str
+
+
+def _normalize_keyword_token(token: str) -> str:
+    base = str(token or "").lower().strip()
+    return KEYWORD_VARIANTS.get(base, base)
+
+
+def _normalize_keyword_text(text: str) -> str:
+    lowered = str(text or "").lower()
+    for variant, canonical in KEYWORD_VARIANTS.items():
+        lowered = re.sub(rf"\b{re.escape(variant)}\b", canonical, lowered)
+    return lowered
+
+
+def _expand_keywords(tokens: list[str]) -> list[str]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+
+    for token in tokens:
+        normalized = _normalize_keyword_token(token)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            expanded.append(normalized)
+
+        synonym_candidates = KEYWORD_SYNONYMS.get(normalized, [normalized])
+        for synonym in synonym_candidates:
+            normalized_syn = _normalize_keyword_token(synonym)
+            if normalized_syn and normalized_syn not in seen:
+                seen.add(normalized_syn)
+                expanded.append(normalized_syn)
+
+    return expanded
+
+
+def _tokenize_name(text: str) -> set[str]:
+    return {
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", str(text or "").lower())
+        if len(token) >= KEYWORD_MIN_LEN and _normalize_keyword_token(token) not in STOPWORDS
+    }
+
+
+def _extract_query_keywords(query: str) -> list[str]:
+    raw_query = str(query or "")
+    base_tokens = [
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", raw_query.lower())
+        if (
+            len(token) >= 3
+            and _normalize_keyword_token(token) not in STOPWORDS
+            and _normalize_keyword_token(token) not in NON_CONTENT_QUERY_WORDS
+        )
+    ]
+    return _expand_keywords(list(dict.fromkeys(base_tokens)))
+
+
+def _extract_core_query_terms(query: str) -> list[str]:
+    tokens = [
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", str(query or "").lower())
+        if len(token) >= KEYWORD_MIN_LEN
+    ]
+    core_terms = [token for token in tokens if token not in STOPWORDS and token not in CORE_TERM_STOPWORDS]
+    return list(dict.fromkeys(core_terms))
+
+
+def _extract_document_selection_keywords(query: str) -> list[str]:
+    tokens = _extract_query_keywords(query)
+    meaningful = [token for token in tokens if token not in GENERIC_QUERY_WORDS]
+    return list(dict.fromkeys(meaningful))
+
+
+def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = sum(a * a for a in vec_a) ** 0.5
+    norm_b = sum(b * b for b in vec_b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _score_document_for_query(
+    query_keywords: list[str],
+    raw_query_tokens: set[str],
+    document_name: str,
+    doc_preview: str,
+    metadata_preview: str,
+    semantic_similarity: float,
+) -> tuple[float, bool, bool]:
+    if not query_keywords:
+        return max(0.0, semantic_similarity), False, False
+
+    normalized_name = _normalize_keyword_text(str(document_name or "").replace("_", " "))
+    normalized_preview = _normalize_keyword_text(str(doc_preview or ""))
+    normalized_meta = _normalize_keyword_text(str(metadata_preview or ""))
+    combined_text = f"{normalized_name} {normalized_preview} {normalized_meta}".strip()
+    combined_tokens = {
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", combined_text)
+        if len(token) >= 2
+    }
+
+    filename_matches = sum(1 for keyword in query_keywords if keyword in normalized_name)
+    preview_matches = sum(
+        1
+        for keyword in query_keywords
+        if keyword in normalized_preview or keyword in normalized_meta
+    )
+    total_meaningful_matches = filename_matches + preview_matches
+
+    generic_hits = sum(1 for token in combined_tokens if token in GENERIC_MATCH_WORDS)
+    query_generic_hits = sum(1 for token in raw_query_tokens if token in GENERIC_MATCH_WORDS)
+    only_generic_match = total_meaningful_matches == 0 and generic_hits > 0 and query_generic_hits > 0
+
+    multiple_keywords_bonus = 2.0 if total_meaningful_matches >= 2 else 0.0
+
+    domain_query = any(token in raw_query_tokens for token in DOMAIN_QUERY_TRIGGERS)
+    domain_doc_hits = sum(1 for token in DOMAIN_BOOST_TERMS if token in combined_tokens)
+    domain_boost = (2.0 * float(domain_doc_hits)) if domain_query and domain_doc_hits > 0 else 0.0
+
+    generic_only_penalty = -2.0 if only_generic_match else 0.0
+
+    keyword_score = (3.0 * float(filename_matches)) + (3.0 * float(preview_matches))
+    semantic_score = max(0.0, semantic_similarity) * 1.5
+    score = keyword_score + multiple_keywords_bonus + domain_boost + generic_only_penalty + semantic_score
+
+    # Hard filter: meaningful keyword presence required and reject generic-only matches.
+    passes_filter = total_meaningful_matches > 0 and not only_generic_match
+    return score, passes_filter, only_generic_match
+
+
+def _select_relevant_documents(
+    collection: Any,
+    query: str,
+    embed_model: SentenceTransformer,
+    top_n: int = 1,
+) -> list[dict[str, str]]:
+    records = collection.get(include=["metadatas", "documents"])
+    metadatas = records.get("metadatas") or []
+    documents = records.get("documents") or []
+
+    query_keywords = _extract_document_selection_keywords(query)
+    raw_query_tokens = {
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", str(query or "").lower())
+        if token
+    }
+    print(f"[RAG] Query meaningful keywords: {query_keywords}")
+
+    query_embedding = embed_model.encode(query, show_progress_bar=False).tolist()
+
+    doc_catalog: dict[str, dict[str, str]] = {}
+    for index, metadata in enumerate(metadatas):
+        if not isinstance(metadata, dict):
+            continue
+        doc_id = str(metadata.get("doc_id", "")).strip()
+        if not doc_id:
+            continue
+        file_name = str(metadata.get("file", "")).strip() or "Uploaded Doc"
+        raw_doc = documents[index] if index < len(documents) else ""
+        doc_text = " ".join(str(raw_doc or "").split()).strip()[:200]
+
+        metadata_fields = []
+        for key in ("title", "name", "author", "keywords", "subject", "description"):
+            if key in metadata and metadata.get(key):
+                metadata_fields.append(str(metadata.get(key)))
+        metadata_preview = " ".join(metadata_fields).strip()[:200]
+
+        if doc_id not in doc_catalog:
+            doc_catalog[doc_id] = {
+                "name": file_name,
+                "doc_preview": doc_text,
+                "metadata_preview": metadata_preview,
+            }
+            continue
+
+        # Keep the first useful preview snippets for scoring.
+        if not doc_catalog[doc_id]["doc_preview"] and doc_text:
+            doc_catalog[doc_id]["doc_preview"] = doc_text
+        if not doc_catalog[doc_id]["metadata_preview"] and metadata_preview:
+            doc_catalog[doc_id]["metadata_preview"] = metadata_preview
+
+    scored: list[tuple[float, bool, bool, str, str]] = []
+    for doc_id, details in doc_catalog.items():
+        doc_name = details.get("name", "Uploaded Doc")
+        doc_preview = details.get("doc_preview", "")
+        metadata_preview = details.get("metadata_preview", "")
+        semantic_source = f"{doc_name} {doc_preview} {metadata_preview}".strip()
+        semantic_embedding = embed_model.encode(semantic_source or doc_name, show_progress_bar=False).tolist()
+        semantic_similarity = _cosine_similarity(query_embedding, semantic_embedding)
+        score, passes_filter, only_generic_match = _score_document_for_query(
+            query_keywords=query_keywords,
+            raw_query_tokens=raw_query_tokens,
+            document_name=doc_name,
+            doc_preview=doc_preview,
+            metadata_preview=metadata_preview,
+            semantic_similarity=semantic_similarity,
+        )
+        scored.append((score, passes_filter, only_generic_match, doc_id, doc_name))
+
+    scored.sort(key=lambda item: (item[1], item[0]), reverse=True)
+
+    filtered = [item for item in scored if item[1]]
+    chosen = filtered[:top_n]
+    if not chosen and scored:
+        # Fallback rule: if hard filter rejects all docs, use best semantic/overall match.
+        print("[RAG] Warning: No document passed meaningful-keyword filter, falling back to best semantic match")
+        scored.sort(key=lambda item: item[0], reverse=True)
+        chosen = [scored[0]]
+    chosen = chosen[:top_n]
+
+    selected = [{"doc_id": doc_id, "name": doc_name} for _, _, _, doc_id, doc_name in chosen]
+    selected_names = [item["name"] for item in selected]
+    print(f"[RAG] Selected documents: {selected_names}")
+    return selected
 
 
 def _normalize_chunk_text(text: str) -> str:
@@ -88,25 +329,28 @@ def _word_windows(text: str, min_words: int = 300, max_words: int = 500, overlap
 
 
 def _tokenize(text: str) -> set[str]:
-    return {token for token in re.findall(r"[a-zA-Z0-9]+", text.lower()) if len(token) > 2}
+    return {
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", text.lower())
+        if len(token) > 2
+    }
 
 
 def _rerank_score(semantic_score: float, chunk_text: str, query_terms: set[str]) -> float:
-    if not query_terms:
-        return semantic_score
-
+    # Semantic similarity is primary; keyword overlap only provides a light boost.
     chunk_tokens = _tokenize(chunk_text)
-    overlap_terms = query_terms & chunk_tokens
-    overlap_count = float(len(overlap_terms))
-    overlap_ratio = overlap_count / max(1.0, float(len(query_terms)))
+    keyword_hits = len(query_terms & chunk_tokens)
+    return float(semantic_score) + (0.1 * float(keyword_hits))
 
-    conceptual_hits = sum(1 for keyword in CONCEPT_KEYWORDS if keyword in chunk_tokens)
-    conceptual_boost = 0.22 * float(conceptual_hits)
 
-    rulebook_hits = sum(1 for keyword in RULEBOOK_TERMS if keyword in chunk_tokens)
-    rulebook_penalty = 0.22 * float(rulebook_hits)
-
-    return semantic_score + (0.45 * overlap_count) + (0.8 * overlap_ratio) + conceptual_boost - rulebook_penalty
+def _passes_explanatory_hard_rule(text: str) -> bool:
+    lowered = f" {str(text or '').lower()} "
+    tokens = _tokenize(text)
+    has_verb = any(verb in tokens for verb in EXPLANATORY_VERBS)
+    is_instruction = any(marker in lowered for marker in INSTRUCTION_MARKERS)
+    symbol_ratio = len(re.findall(r"[^\w\s]", str(text or ""))) / float(max(1, len(str(text or ""))))
+    numeric_like_only = (_digit_ratio(text) > 0.40 or symbol_ratio > 0.30) and not has_verb
+    return has_verb and (not is_instruction) and (not numeric_like_only)
 
 
 def _digit_ratio(text: str) -> float:
@@ -137,8 +381,9 @@ def _quality_signals(text: str) -> tuple[int, int, int]:
 
 def _is_preferred_chunk(text: str) -> bool:
     conceptual_hits, rulebook_hits, teaching_hits = _quality_signals(text)
+    has_explanatory_verb = any(verb in _tokenize(text) for verb in EXPLANATORY_VERBS)
     has_heavy_rulebook = rulebook_hits >= 2
-    has_teaching_signal = teaching_hits >= 1 or conceptual_hits >= 2
+    has_teaching_signal = teaching_hits >= 1 or conceptual_hits >= 2 or has_explanatory_verb
     return (not has_heavy_rulebook) and has_teaching_signal
 
 
@@ -223,7 +468,11 @@ def _is_near_duplicate(text_a: str, text_b: str, threshold: float = 0.85) -> boo
 
 def _normalize_query_text(query: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", str(query).lower())
-    tokens = [token for token in cleaned.split() if token and token not in STOPWORDS]
+    tokens = [
+        token
+        for token in cleaned.split()
+        if token and token not in STOPWORDS and token not in NON_CONTENT_QUERY_WORDS and len(token) >= 3
+    ]
     return " ".join(tokens)
 
 
@@ -246,10 +495,8 @@ def _build_query_variations(query: str) -> list[str]:
 
 
 def _get_embed_model() -> SentenceTransformer:
-    global _embed_model
-    if _embed_model is None:
-        _embed_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    return _embed_model
+    # Reuse the single global embedder managed by db.py.
+    return get_embedder()
 
 
 def retrieve_chunks(
@@ -257,123 +504,90 @@ def retrieve_chunks(
     top_k: int = 5,
     document_id: str | None = None,
 ) -> RetrievalResult:
-    print("[RAG] Retrieval started")
     collection = get_collection()
-    print(f"[RAG] Retrieval using collection: {collection.name}")
-    print("[RAG] Total chunks in DB:", collection.count())
-    query_variations = _build_query_variations(query)
-    print("[RAG] Query variations:", query_variations)
-    query_terms = _tokenize(_normalize_query_text(query))
-    query_terms_ordered = [
-        token for token in _normalize_query_text(query).split() if token
-    ]
+    total_chunks = int(collection.count())
+    print(f"[RAG] Total chunks: {total_chunks}")
 
-    where = {"doc_id": document_id} if document_id else None
-    query_results: list[dict[str, Any]] = []
-    # Keep retrieval broad, but enforce strict final context selection later.
-    n_results = max(top_k, 8)
+    if total_chunks <= 0:
+        return {"chunks": [], "context": "No relevant context found in documents."}
+
+    query_terms = set(_extract_query_keywords(query))
     embed_model = _get_embed_model()
+    query_embedding = embed_model.encode(
+        query,
+        show_progress_bar=False,
+        normalize_embeddings=True,
+    ).tolist()
 
-    for variation in query_variations:
-        variation_embedding = embed_model.encode(variation, show_progress_bar=False).tolist()
-        results = collection.query(
-            query_embeddings=[variation_embedding],
-            n_results=n_results,
-            where=where,
-            include=["documents", "metadatas", "distances"],
+    top_k = min(12, total_chunks)
+    where = {"doc_id": document_id} if document_id else None
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+        where=where,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    docs = (results.get("documents") or [[]])[0] if results.get("documents") else []
+    metadatas = (results.get("metadatas") or [[]])[0] if results.get("metadatas") else []
+    distances = (results.get("distances") or [[]])[0] if results.get("distances") else []
+
+    retrieved_count = len(docs)
+    print(f"[RAG] Retrieved: {retrieved_count}")
+
+    scored: list[tuple[float, RetrievedChunk]] = []
+    all_scores: list[float] = []
+
+    for idx, raw_chunk in enumerate(docs):
+        text = _normalize_chunk_text(str(raw_chunk or ""))
+        if not text:
+            continue
+
+        metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+        distance_val = distances[idx] if idx < len(distances) else None
+        semantic_score = 0.0
+        if isinstance(distance_val, (int, float)):
+            semantic_score = max(0.0, 1.0 - float(distance_val))
+
+        chunk_tokens = _tokenize(text)
+        keyword_hits = len(query_terms & chunk_tokens)
+        final_score = float(semantic_score) + (0.1 * float(keyword_hits))
+
+        page_val = metadata.get("page")
+        page = page_val if isinstance(page_val, int) else int(page_val) if isinstance(page_val, str) and page_val.isdigit() else None
+
+        scored.append(
+            (
+                final_score,
+                {
+                    "text": text,
+                    "file": str(metadata.get("file", "unknown.pdf")),
+                    "doc_id": str(metadata.get("doc_id", "")),
+                    "page": page,
+                    "metadata": metadata,
+                },
+            )
         )
-        docs_for_variation = results.get("documents", []) or []
-        variation_chunk_count = sum(len(doc_list) for doc_list in docs_for_variation if isinstance(doc_list, list))
-        print(f"[RAG] Variation '{variation}' retrieved {variation_chunk_count} chunks")
-        query_results.append(results)
+        all_scores.append(round(final_score, 4))
 
-    candidates: list[tuple[float, RetrievedChunk]] = []
-    filter_stats = {
-        "dropped_noisy_ratio": 0,
-        "dropped_too_short": 0,
-        "dropped_noisy_chunk": 0,
-        "dropped_post_clip_noisy": 0,
-    }
+    scored.sort(key=lambda item: item[0], reverse=True)
+    for idx, (_, chunk) in enumerate(scored[:5], start=1):
+        preview = _normalize_chunk_text(str(chunk.get("text", "")))[:200]
+        print(f"[RAG] Top chunk {idx}: {preview}")
 
-    for results in query_results:
-        docs = results.get("documents", []) or []
-        metadatas = results.get("metadatas", []) or []
-        distances = results.get("distances", []) or []
-
-        for i, doc_list in enumerate(docs):
-            if not isinstance(doc_list, list):
-                continue
-
-            metadata_list = metadatas[i] if i < len(metadatas) and isinstance(metadatas[i], list) else []
-            distance_list = distances[i] if i < len(distances) and isinstance(distances[i], list) else []
-
-            for j, chunk in enumerate(doc_list):
-                raw_text = str(chunk) if chunk else ""
-                denoised_text, noisy_ratio = _strip_noisy_lines(raw_text)
-                if noisy_ratio >= 0.95:
-                    filter_stats["dropped_noisy_ratio"] += 1
-                    continue
-
-                cleaned_text = _clean_broken_sentences(denoised_text)
-                if not cleaned_text or len(cleaned_text) <= 40:
-                    filter_stats["dropped_too_short"] += 1
-                    continue
-
-                if _is_noisy_chunk(cleaned_text):
-                    filter_stats["dropped_noisy_chunk"] += 1
-                    continue
-
-                cleaned_text = cleaned_text.strip().replace("\n", " ")
-                clipped_text = _clip_excerpt(cleaned_text, max_chars=480)
-                if not clipped_text or _is_noisy_chunk(clipped_text):
-                    filter_stats["dropped_post_clip_noisy"] += 1
-                    continue
-
-                metadata = metadata_list[j] if j < len(metadata_list) and isinstance(metadata_list[j], dict) else {}
-
-                distance_val = distance_list[j] if j < len(distance_list) else None
-                semantic_score = 0.0
-                if isinstance(distance_val, (int, float)):
-                    semantic_score = 1.0 / (1.0 + float(distance_val))
-
-                page_val = metadata.get("page")
-                page = page_val if isinstance(page_val, int) else int(page_val) if isinstance(page_val, str) and page_val.isdigit() else None
-
-                candidates.append(
-                    (
-                        semantic_score,
-                        {
-                            "text": clipped_text,
-                            "file": str(metadata.get("file", "unknown.pdf")),
-                            "doc_id": str(metadata.get("doc_id", "")),
-                            "page": page,
-                            "metadata": metadata,
-                        },
-                    )
-                )
-
-    scored_chunks: list[tuple[float, RetrievedChunk]] = []
-    for semantic_score, chunk in candidates:
-        combined_score = _rerank_score(semantic_score, chunk["text"], query_terms)
-        scored_chunks.append((combined_score, chunk))
-
-    scored_chunks.sort(key=lambda item: item[0], reverse=True)
-
+    desired_count = min(5, max(3, len(scored)))
     selected_chunks: list[RetrievedChunk] = []
     seen_texts: set[str] = set()
-    max_selected = 3
 
-    preferred_scored = [item for item in scored_chunks if _is_preferred_chunk(item[1].get("text", ""))]
-    fallback_scored = [item for item in scored_chunks if not _is_preferred_chunk(item[1].get("text", ""))]
-
-    for score, chunk in preferred_scored + fallback_scored:
-        text_key = _normalize_chunk_text(chunk["text"]).lower()
+    for _, chunk in scored:
+        text_key = _normalize_chunk_text(chunk.get("text", "")).lower()
         if not text_key or text_key in seen_texts:
             continue
 
         duplicate_like = False
         for existing in selected_chunks:
-            if _is_near_duplicate(text_key, _normalize_chunk_text(existing["text"]).lower()):
+            existing_text = _normalize_chunk_text(existing.get("text", "")).lower()
+            if _is_near_duplicate(text_key, existing_text):
                 duplicate_like = True
                 break
         if duplicate_like:
@@ -381,47 +595,45 @@ def retrieve_chunks(
 
         seen_texts.add(text_key)
         selected_chunks.append(chunk)
-        if len(selected_chunks) >= max_selected:
+        if len(selected_chunks) >= desired_count:
             break
 
-    if "attention" in query_terms:
-        has_attention = any("attention" in _normalize_chunk_text(c["text"]).lower() for c in selected_chunks)
-        if not has_attention:
-            for _, chunk in scored_chunks:
-                candidate_text = _normalize_chunk_text(chunk["text"]).lower()
-                if "attention" in candidate_text:
-                    replaced = False
-                    for i, existing in enumerate(selected_chunks):
-                        if "attention" not in _normalize_chunk_text(existing["text"]).lower():
-                            selected_chunks[i] = chunk
-                            replaced = True
-                            break
-                    if not replaced and len(selected_chunks) < max_selected:
-                        selected_chunks.append(chunk)
-                    break
+    if not selected_chunks and scored:
+        selected_chunks = [scored[0][1]]
 
-    print(f"[RAG] Retrieved {len(selected_chunks)} chunks")
-    for idx, chunk in enumerate(selected_chunks, start=1):
-        chunk_text = _normalize_chunk_text(chunk.get("text", ""))
-        preview = chunk_text[:150]
-        present_terms = [term for term in query_terms_ordered if term in chunk_text.lower()]
-        print(f"[RAG] Final chunk {idx}: {preview}")
-        print(f"[RAG] Chunk {idx} query keywords: {present_terms}")
+    if not selected_chunks:
+        for idx, raw_chunk in enumerate(docs):
+            raw_text = _normalize_chunk_text(str(raw_chunk or ""))
+            if not raw_text:
+                continue
+            metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+            page_val = metadata.get("page")
+            page = page_val if isinstance(page_val, int) else int(page_val) if isinstance(page_val, str) and page_val.isdigit() else None
+            selected_chunks = [{
+                "text": raw_text,
+                "file": str(metadata.get("file", "unknown.pdf")),
+                "doc_id": str(metadata.get("doc_id", "")),
+                "page": page,
+                "metadata": metadata,
+            }]
+            break
 
-    context_chunks: List[str] = []
-    for i, chunk in enumerate(selected_chunks):
-        doc = chunk.get("file") or "Uploaded Doc"
-        page = chunk.get("page")
-        source_label = f"{doc} (Page {page})" if page is not None else str(doc)
-        excerpt = _clip_excerpt(chunk["text"], max_chars=480)
-        context_chunks.append(f"[Source: {source_label}]\n{excerpt}")
+    print(f"[RAG] Final selected: {len(selected_chunks)}")
+    print(f"[RAG] Scores: {all_scores}")
 
-    context = "\n\n".join(context_chunks)
-    context = _normalize_chunk_text(context)
-    if len(context) > 2000:
-        context = context[:2000].strip()
+    def build_context(chunks: list[RetrievedChunk]) -> str:
+        selected = chunks[:4]  # only top 4 chunks
 
-    clean_previews = [_normalize_chunk_text(chunk.get("text", ""))[:120] for chunk in selected_chunks]
-    print("[RAG] Clean chunks used:", clean_previews)
-    print("[RAG] Final context length:", len(context))
-    return {"chunks": selected_chunks, "context": context}
+        context = ""
+        for i, chunk in enumerate(selected):
+            text = str(chunk.get("text", "")).strip()
+            if text:
+                context += f"\nChunk {i+1}:\n{text[:400]}\n"
+
+        return context.strip()
+
+    context = build_context(selected_chunks)
+    if not context:
+        context = "No relevant context found in documents."
+    assert len(context) < 2000
+    return {"chunks": selected_chunks, "context": context.strip()}

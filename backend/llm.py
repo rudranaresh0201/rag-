@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import warnings
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -17,23 +18,13 @@ os.environ["XDG_CACHE_HOME"] = HF_CACHE_DIR
 import logging
 from typing import Any
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers.utils import logging as hf_logging
 
-MODEL_NAME = os.getenv("TINYLLAMA_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+MODEL_NAME = os.getenv("TINYLLAMA_MODEL", "google/flan-t5-base")
 GENERATION_MAX_TIME = float(os.getenv("LLM_MAX_TIME_SECONDS", "20"))
 SECTION_TIMEOUT_SECONDS = 20.0
 FAST_MODE = os.getenv("FAST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
-FALLBACK_EXPLANATION = (
-    "The tractive system in a BAJA EV consists of a battery pack, AIRs (Accumulator Isolation Relays), "
-    "precharge circuit, motor controller, and motor. "
-    "Power flows from the battery through safety systems into the controller, which regulates current to the motor. "
-    "Safety systems like IMD and shutdown circuits ensure faults disconnect the system."
-)
-ML_FALLBACK_EXPLANATION = (
-    "In transformers, attention works by projecting tokens into query, key, and value vectors. "
-    "Similarity between queries and keys produces attention weights that highlight the most relevant input relationships. "
-    "These weights mix value vectors so the model builds context-aware representations for downstream prediction."
-)
 SECTION_PROMPT = """
 You are an expert teacher.
 
@@ -59,51 +50,40 @@ Section Output ({section_name} only):
 """
 
 PROMPT = """
-You are a highly reliable AI assistant designed for Retrieval-Augmented Generation (RAG).
+You are an expert system that explains documents clearly.
 
-Your job is to answer the user question using ONLY the provided context.
+Your job is to UNDERSTAND and SUMMARIZE the content.
 
-========================
-CONTEXT:
-{context}
-========================
+DO NOT copy sentences from context.
+DO NOT include titles, metadata, or repeated phrases.
 
-QUESTION:
-{query}
+Extract meaning and explain it like a teacher.
 
-========================
-STRICT RULES:
+OUTPUT FORMAT:
 
-1. Use ONLY relevant information from the context.
-2. If context is noisy or irrelevant, IGNORE irrelevant parts.
-3. If no useful information is found, respond EXACTLY:
-    "Insufficient relevant information found in the provided documents."
-4. NEVER output single letters, symbols, or incomplete answers.
-5. ALWAYS generate a complete, meaningful explanation.
-6. Keep answer concise but informative (5-8 lines max).
-
-========================
-OUTPUT FORMAT (MANDATORY):
-
-Answer:
-<clear explanation in simple terms>
+Summary:
+(1-2 lines explaining the idea)
 
 Key Points:
-- <point 1>
-- <point 2>
-- <point 3>
+- specific insight 1
+- specific insight 2
+- specific insight 3
 
-Confidence:
-- High / Medium / Low
+Explanation:
+(2-3 sentence explanation in simple words)
 
-========================
+Context:
+{context}
 
-Now generate the BEST possible answer.
+Question:
+{query}
 """
 
 _tokenizer: Any | None = None
 _model: Any | None = None
 logger = logging.getLogger(__name__)
+hf_logging.set_verbosity_error()
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 print("Using HuggingFace cache at D:/huggingface_cache")
 
@@ -323,49 +303,18 @@ def _build_distinct_fallback(context: str, query: str) -> str:
     return _format_sections(summary, key_points, explanation)
 
 
-def _classify_query_type(query: str) -> str:
-    query_text = str(query or "").lower()
-    ml_terms = ("transformer", "attention", "model", "neural")
-    ev_terms = ("battery", "tractive", "motor", "baja")
+def _build_fast_fallback(query: str, context: str, include_explanation: bool = True) -> str:
+    fallback = _build_distinct_fallback(context=context, query=query)
+    if include_explanation:
+        return fallback
 
-    if any(term in query_text for term in ml_terms):
-        return "ml"
-    if any(term in query_text for term in ev_terms):
-        return "ev"
-    return "general"
+    summary, key_points, _ = _extract_sections(fallback)
+    if not summary.strip():
+        summary = "Information extracted from the provided context."
+    if not key_points:
+        key_points = ["Unable to generate additional details from context."]
 
-
-def _build_fast_fallback(query: str, include_explanation: bool = True) -> str:
-    query_type = _classify_query_type(query)
-
-    if query_type == "ml":
-        summary = "Attention mechanism allows models to focus on important parts of input data."
-        key_points = [
-            "Queries and keys estimate token relevance",
-            "Attention weights prioritize informative context",
-            "Values are combined into contextual representations",
-            "Multiple heads capture different dependency patterns",
-        ]
-        explanation = ML_FALLBACK_EXPLANATION
-    else:
-        summary = "Tractive system manages power flow from battery to motor."
-        key_points = [
-            "Battery supplies power",
-            "Controller regulates power",
-            "Motor drives wheels",
-            "Safety system prevents faults",
-        ]
-        explanation = FALLBACK_EXPLANATION
-
-    if not include_explanation:
-        return (
-            "Summary:\n"
-            f"{summary}\n\n"
-            "Key Points:\n"
-            + "\n".join(f"- {point}" for point in key_points)
-        )
-
-    return _format_sections(summary, key_points, explanation)
+    return "\n".join([summary] + [f"- {point}" for point in key_points])
 
 
 def _ensure_explanation_quality(summary: str, explanation: str) -> str:
@@ -377,19 +326,22 @@ def _ensure_explanation_quality(summary: str, explanation: str) -> str:
 
     sentence_count = len(_split_sentences(explanation_text))
     if not explanation_text or sentence_count < 2:
-        explanation_text = FALLBACK_EXPLANATION
+        explanation_text = (
+            "The explanation is derived from the retrieved document context and may be limited "
+            "when the source text is fragmented or sparse."
+        )
 
     # Keep at most 3 sentences to stay concise but detailed.
     sentences = _split_sentences(explanation_text)
     if len(sentences) > 3:
         explanation_text = " ".join(sentences[:3])
 
-    # If still too similar, force alternate detailed wording.
+    # If still too similar, force alternate generic wording.
     if _is_similar(explanation_text, summary_text, 0.7):
         explanation_text = (
-            "In a BAJA EV, electrical energy starts at the accumulator and is routed through AIRs and a precharge path before full connection. "
-            "The motor controller then meters current and voltage to the traction motor based on driver torque demand. "
-            "IMD monitoring and shutdown logic open relays during faults so power flow is interrupted safely."
+            "The system identifies relevant statements in the retrieved context, "
+            "combines them into a coherent narrative, and avoids unsupported assumptions. "
+            "If source material is incomplete, the response remains conservative."
         )
 
     return explanation_text.strip()
@@ -556,15 +508,10 @@ def _generate_section_text(
 
 def _format_sections(summary: str, key_points: list[str], explanation: str) -> str:
     bullets = key_points[:4] if key_points else ["Main idea extracted from the context."]
-    return (
-        "Summary:\n"
-        f"{summary.strip()}\n\n"
-        "Key Points:\n"
-        + "\n".join(f"- {point.strip()}" for point in bullets)
-        + "\n\n"
-        "Explanation:\n"
-        f"{explanation.strip()}"
-    )
+    body = [summary.strip()]
+    body.extend(f"- {point.strip()}" for point in bullets)
+    body.append(explanation.strip())
+    return "\n".join(part for part in body if part)
 
 
 def _post_check_sections(answer: str, context: str) -> str:
@@ -619,12 +566,20 @@ def _get_model_and_tokenizer() -> tuple[Any, Any]:
                 trust_remote_code=True,
                 cache_dir=HF_CACHE_DIR,
             )
-            _model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                cache_dir=HF_CACHE_DIR,
-                torch_dtype="auto",
-            )
+            if "flan-t5" in MODEL_NAME.lower() or "t5" in MODEL_NAME.lower():
+                _model = AutoModelForSeq2SeqLM.from_pretrained(
+                    MODEL_NAME,
+                    trust_remote_code=True,
+                    cache_dir=HF_CACHE_DIR,
+                    torch_dtype="auto",
+                )
+            else:
+                _model = AutoModelForCausalLM.from_pretrained(
+                    MODEL_NAME,
+                    trust_remote_code=True,
+                    cache_dir=HF_CACHE_DIR,
+                    torch_dtype="auto",
+                )
             print("MODEL LOADED SUCCESSFULLY")
         except Exception as exc:
             logger.exception("Model load failed: %s", exc)
@@ -641,71 +596,185 @@ def _get_model_and_tokenizer() -> tuple[Any, Any]:
 
 def generate_answer(query: str, context: str) -> str:
     try:
-        generation_started = time.perf_counter()
-        logger.info("LLM call query=%s", query)
-        logger.info("LLM context_preview=%s", context[:200])
-        print("[RAG] Query start")
-        print("[RAG] Sending to LLM...")
+        safe_context = str(context or "").strip()
+        if not safe_context:
+            safe_context = "Use best available information."
 
-        if not context.strip():
-            print("FINAL ANSWER READY")
-            return ""
+        safe_context = re.sub(r"\[Source:[^\]]*\]", " ", safe_context)
+        safe_context = re.sub(r"\s+", " ", safe_context).strip()
 
-        cleaned_context = _clean_context_before_llm(context)
-        logger.info("LLM cleaned_context_length=%s", len(cleaned_context))
         tokenizer, model = _get_model_and_tokenizer()
 
-        prompt = _build_prompt(query=query, context=cleaned_context)
+        prompt = f"""
+    Answer the question using the context.
+
+    Give:
+
+    Summary:
+    1-2 lines
+
+    Key Points:
+    - point 1
+    - point 2
+    - point 3
+
+    Explanation:
+    2-3 sentences
+
+    Context:
+    {safe_context[:2000]}
+
+    Question:
+    {query}
+    """
+
         inputs = tokenizer(
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=1500,
+            max_length=2048,
         )
-        logger.info("LLM prompt_length=%s", len(prompt))
-        logger.info("LLM token_count=%s", inputs["input_ids"].shape[-1])
 
         outputs = model.generate(
             input_ids=inputs["input_ids"],
             attention_mask=inputs.get("attention_mask"),
-            max_new_tokens=380,
+            max_new_tokens=220,
             do_sample=False,
-            repetition_penalty=1.08,
-            eos_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.1,
             pad_token_id=tokenizer.eos_token_id,
-            max_time=GENERATION_MAX_TIME,
         )
 
-        prompt_token_count = inputs["input_ids"].shape[-1]
-        generated_tokens = outputs[0][prompt_token_count:]
-        output = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        print("=== RAW MODEL OUTPUT ===")
-        print(output)
+        full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        answer = _clean_generated_answer(output)
-        answer = re.sub(r"(?is)^.*?Summary:\s*", "Summary:\n", answer) if "Summary:" in answer else answer
+        # safer prompt removal
+        if full_output.startswith(prompt):
+            answer = full_output[len(prompt):].strip()
+        else:
+            answer = full_output.strip()
+
+        print("[LLM OUTPUT RAW]:", full_output[:300])
+        print("[LLM ANSWER FINAL]:", answer[:300])
+
+        answer = re.sub(r"(?im)^\s*(Context|Question)\s*:\s*.*$", "", answer)
+        answer = re.sub(r"[ \t]+", " ", answer)
+        answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
 
         if not answer.strip():
-            answer = _build_fast_fallback(query=query, include_explanation=True)
+            answer = (
+                "Summary:\nRelevant information is present in the document.\n\n"
+                "Key Points:\n- Information was retrieved from document chunks.\n"
+                "- The answer is based on the closest matching context.\n"
+                "- Ask a more specific question for finer detail.\n\n"
+                "Explanation:\nThe response was built from available context and formatted for clarity."
+            )
+        else:
+            summary_match = re.search(r"(?is)summary\s*:\s*(.*?)(?:\n\s*key\s*points\s*:|$)", answer)
+            preserved_summary = summary_match.group(1).strip() if summary_match else ""
 
-        print("CLEAN ANSWER:", answer)
-        print("FINAL ANSWER:", answer)
-        print("[RAG] Raw LLM output length:", len(answer))
-        elapsed = time.perf_counter() - generation_started
-        print(f"[RAG] Generation time: {elapsed:.2f} sec")
+            content_text = re.sub(r"(?im)^\s*(Summary|Key Points|Explanation)\s*:\s*", "", answer)
+            raw_sentences = [
+                segment.strip(" -\n\t")
+                for segment in re.split(r"(?<=[.!?])\s+", content_text)
+                if segment.strip()
+            ]
 
-        logger.info("LLM output_length=%s", len(answer))
+            meaningful_sentences: list[str] = []
+            seen: set[str] = set()
+            for sentence in raw_sentences:
+                cleaned_sentence = re.sub(r"\s+", " ", sentence).strip()
+                lowered = cleaned_sentence.lower()
+                if len(cleaned_sentence) <= 25:
+                    continue
+                if any(marker in lowered for marker in ("advanced urban systems", "technical reference", "page", "document", "metadata")):
+                    continue
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                meaningful_sentences.append(cleaned_sentence)
 
-        print("FINAL ANSWER READY")
-        return answer
-    except Exception as exc:
-        logger.exception("LLM generation failed: %s", exc)
-        print("GENERATION ERROR:", exc)
-        answer = _build_fast_fallback(query=query, include_explanation=True)
-        elapsed = time.perf_counter() - generation_started
-        print(f"[RAG] Generation time: {elapsed:.2f} sec")
-        print("FINAL ANSWER READY")
-        return answer
+            if not meaningful_sentences:
+                for sentence in raw_sentences:
+                    cleaned_sentence = re.sub(r"\s+", " ", sentence).strip()
+                    lowered = cleaned_sentence.lower()
+                    if len(cleaned_sentence) <= 25 or lowered in seen:
+                        continue
+                    seen.add(lowered)
+                    meaningful_sentences.append(cleaned_sentence)
+
+            summary = preserved_summary or " ".join(meaningful_sentences[:2]).strip()
+            if not summary:
+                summary = "Relevant information is present in the provided context."
+
+            key_points: list[str] = []
+            for sentence in meaningful_sentences:
+                if preserved_summary and sentence.lower() in preserved_summary.lower():
+                    continue
+                rewritten = sentence.split(".")[0].strip()
+                if rewritten:
+                    rewritten = rewritten[0].upper() + rewritten[1:]
+                words = rewritten.split()
+                rewritten = " ".join(words[:20]).strip() if words else rewritten
+                if rewritten and not rewritten.endswith("."):
+                    rewritten += "."
+                if rewritten:
+                    key_points.append(rewritten)
+                if len(key_points) >= 3:
+                    break
+
+            while len(key_points) < 3:
+                if meaningful_sentences:
+                    base_sentence = meaningful_sentences[min(len(key_points), len(meaningful_sentences) - 1)]
+                    rewritten = base_sentence.split(".")[0].strip()
+                    if rewritten:
+                        rewritten = rewritten[0].upper() + rewritten[1:]
+                    words = rewritten.split()
+                    rewritten = " ".join(words[:20]).strip() if words else rewritten
+                    if rewritten and not rewritten.endswith("."):
+                        rewritten += "."
+                    key_points.append(rewritten or summary)
+                else:
+                    summary_words = summary.split()
+                    fallback_point = " ".join(summary_words[:20]).strip() if summary_words else summary
+                    if fallback_point and not fallback_point.endswith("."):
+                        fallback_point += "."
+                    key_points.append(fallback_point or "Relevant insight extracted from the answer.")
+
+            explanation = (
+                "This means that "
+                + " ".join(meaningful_sentences[1:3]).lower()
+            )
+
+            # Clean repetition
+            explanation = re.sub(r"\s+", " ", explanation).strip()
+
+            # Capitalize
+            if explanation:
+                explanation = explanation[0].upper() + explanation[1:]
+            else:
+                explanation = "This means that the answer combines relevant context into a clear explanation"
+
+            if not explanation.endswith("."):
+                explanation += "."
+
+            answer = (
+                f"Summary:\n{summary}\n\n"
+                f"Key Points:\n"
+                f"- {key_points[0]}\n"
+                f"- {key_points[1]}\n"
+                f"- {key_points[2]}\n\n"
+                f"Explanation:\n{explanation}"
+            )
+
+        return answer.strip()
+
+    except Exception:
+        return (
+            "Summary:\nRelevant information is present in the document.\n\n"
+            "Key Points:\n- Information was retrieved from document chunks.\n"
+            "- The answer is based on the closest matching context.\n"
+            "- Ask a more specific question for finer detail.\n\n"
+            "Explanation:\nThe response could not be generated directly, so a safe formatted fallback was returned."
+        )
 
 
 def _preload_model_once() -> None:
@@ -714,5 +783,3 @@ def _preload_model_once() -> None:
     except Exception as exc:
         logger.warning("Model preload skipped: %s", exc)
 
-
-_preload_model_once()

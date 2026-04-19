@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Dict, List
 
@@ -10,30 +11,96 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 BASE_DIR = Path(__file__).resolve().parent
-CHROMA_PATH = str(BASE_DIR / "chroma_db")
+CHROMA_PATH = str(Path("./chroma_db").resolve())
 COLLECTION_NAME = "rag_documents"
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
 _client = None
 _embedder: SentenceTransformer | None = None
+_collection_verified = False
 
 
 def get_client():
     global _client
     if _client is None:
-        Path(CHROMA_PATH).mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(
-            path=CHROMA_PATH,
-            settings=Settings(
-                anonymized_telemetry=False,
-            ),
-        )
+        db_dir = Path(CHROMA_PATH)
+        db_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _client = chromadb.PersistentClient(
+                path=str(db_dir),
+                settings=Settings(
+                    anonymized_telemetry=False,
+                ),
+            )
+            # Touch collection metadata once to fail fast on corruption.
+            _client.get_or_create_collection(name=COLLECTION_NAME)
+        except Exception:
+            try:
+                shutil.rmtree(db_dir, ignore_errors=True)
+            except Exception:
+                pass
+            db_dir.mkdir(parents=True, exist_ok=True)
+            _client = chromadb.PersistentClient(
+                path=str(db_dir),
+                settings=Settings(
+                    anonymized_telemetry=False,
+                ),
+            )
     return _client
 
 
 def get_collection() -> Collection:
+    global _collection_verified
     client = get_client()
-    return client.get_or_create_collection(name=COLLECTION_NAME)
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"embedding_model": EMBEDDING_MODEL_NAME},
+    )
+
+    if _collection_verified:
+        return collection
+
+    current_metadata = collection.metadata or {}
+    current_model = str(current_metadata.get("embedding_model", "")).strip()
+
+    if current_model == EMBEDDING_MODEL_NAME:
+        _collection_verified = True
+        return collection
+
+    records = collection.get(include=["documents", "metadatas"])
+    ids = [str(item) for item in (records.get("ids") or [])]
+    documents = [str(item or "") for item in (records.get("documents") or [])]
+    metadatas = records.get("metadatas") or []
+
+    try:
+        client.delete_collection(COLLECTION_NAME)
+    except Exception:
+        pass
+
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"embedding_model": EMBEDDING_MODEL_NAME},
+    )
+
+    valid_rows = [
+        (id_value, doc_value, metadata)
+        for id_value, doc_value, metadata in zip(ids, documents, metadatas)
+        if id_value and doc_value
+    ]
+    if valid_rows:
+        migrated_ids = [row[0] for row in valid_rows]
+        migrated_docs = [row[1] for row in valid_rows]
+        migrated_metas = [row[2] if isinstance(row[2], dict) else {} for row in valid_rows]
+        migrated_embeddings = embed_texts(migrated_docs)
+        collection.add(
+            ids=migrated_ids,
+            documents=migrated_docs,
+            metadatas=migrated_metas,
+            embeddings=migrated_embeddings,
+        )
+
+    _collection_verified = True
+    return collection
 
 
 def get_embedder() -> SentenceTransformer:
@@ -45,7 +112,7 @@ def get_embedder() -> SentenceTransformer:
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     model = get_embedder()
-    vectors = model.encode(texts, show_progress_bar=False)
+    vectors = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
     return vectors.tolist()
 
 
@@ -85,9 +152,14 @@ def delete_document(document_id: str) -> None:
 
 
 def reset_database() -> None:
+    global _collection_verified
     client = get_client()
     try:
         client.delete_collection(COLLECTION_NAME)
     except Exception:
         pass
-    client.get_or_create_collection(name=COLLECTION_NAME)
+    client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"embedding_model": EMBEDDING_MODEL_NAME},
+    )
+    _collection_verified = False

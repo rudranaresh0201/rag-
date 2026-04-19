@@ -21,13 +21,27 @@ import {
 const TABS = ["Answer", "Evidence", "Insights"];
 
 function normalizeDocuments(payload) {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-  if (Array.isArray(payload?.value)) {
-    return payload.value;
-  }
-  return [];
+  if (!Array.isArray(payload)) return [];
+
+  const map = new Map();
+
+  payload.forEach((row, i) => {
+    const id = String(row?.doc_id || "").trim();
+    if (!id) return;
+
+    if (!map.has(id)) {
+      map.set(id, {
+        id,
+        name: row?.file || `Document ${i + 1}`,
+        chunks: 0,
+      });
+    }
+
+    const doc = map.get(id);
+    doc.chunks += 1;
+  });
+
+  return Array.from(map.values());
 }
 
 function normalizeSources(sources) {
@@ -80,8 +94,9 @@ function Dashboard() {
   );
 
   const refreshDocuments = async () => {
-    const docs = normalizeDocuments(await listDocuments());
-    setUploadedFiles(docs);
+    const data = await listDocuments();
+    const normalized = normalizeDocuments(data);
+    setUploadedFiles(normalized);
   };
 
   useEffect(() => {
@@ -89,11 +104,12 @@ function Dashboard() {
 
     const bootstrap = async () => {
       try {
-        const docs = normalizeDocuments(await listDocuments());
+        const data = await listDocuments();
+        const normalized = normalizeDocuments(data);
         if (!mounted) {
           return;
         }
-        setUploadedFiles(docs);
+        setUploadedFiles(normalized);
       } catch (err) {
         if (!mounted) {
           return;
@@ -108,6 +124,10 @@ function Dashboard() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    console.log("DOCUMENT STATE:", uploadedFiles);
+  }, [uploadedFiles]);
 
   const handleUpload = async (file) => {
     setError("");
@@ -144,6 +164,7 @@ function Dashboard() {
   };
 
   const handleDeleteFile = async (fileId) => {
+    if (!fileId) return;
     setError("");
     try {
       await deleteDocument(fileId);

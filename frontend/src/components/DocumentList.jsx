@@ -8,22 +8,19 @@ function DocumentList({
   onDeleteDocument,
   collapsed = false,
 }) {
-  if (!uploadedFiles.length) {
-    return (
-      <div className="rounded-2xl border border-white/15 bg-slate-900/45 p-3 text-xs text-slate-300">
-        {collapsed ? "0" : "No documents uploaded yet."}
-      </div>
-    );
-  }
+  const documents = Array.isArray(uploadedFiles) ? uploadedFiles : [];
 
   return (
     <div className="space-y-2">
-      {uploadedFiles.map((file) => {
-        const isActive = activeDocumentId === file.id;
+      {documents?.length > 0 ? (
+        documents.map((file) => {
+        const doc = file || {};
+        console.log("DOCUMENT ITEM:", doc);
+        const isActive = activeDocumentId === doc.id;
 
         return (
           <motion.div
-            key={file.id}
+            key={doc.id}
             whileHover={{ y: -1 }}
             className={`rounded-2xl border p-2 transition ${
               isActive
@@ -33,18 +30,18 @@ function DocumentList({
           >
             <button
               type="button"
-              onClick={() => onSelectDocument(file.id)}
+              onClick={() => onSelectDocument(doc.id)}
               className="w-full text-left"
-              title={file.name}
+              title={doc.name}
             >
               <div className="inline-flex items-center gap-2">
                 <HiDocumentText className="text-sm text-indigo-200" />
                 {!collapsed && (
-                  <span className="line-clamp-1 text-sm font-semibold text-slate-100">{file.name}</span>
+                  <span className="line-clamp-1 text-sm font-semibold text-slate-100">{doc.name}</span>
                 )}
               </div>
               {!collapsed && (
-                <p className="mt-1 text-[11px] text-slate-400">{file.chunks || 0} chunks</p>
+                <p className="mt-1 text-[11px] text-slate-400">{doc.chunk_count || doc.chunks || "Available"} chunks</p>
               )}
             </button>
 
@@ -53,8 +50,9 @@ function DocumentList({
                 <span className="text-[11px] text-slate-300">{isActive ? "Active" : "Available"}</span>
                 <button
                   type="button"
-                  onClick={() => onDeleteDocument(file.id)}
-                  className="inline-flex items-center gap-1 rounded-lg border border-rose-300/40 px-2 py-1 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-400/15"
+                  onClick={() => {}}
+                  disabled
+                  className="inline-flex items-center gap-1 rounded-lg border border-rose-300/20 px-2 py-1 text-[11px] font-semibold text-rose-200/60"
                 >
                   <HiTrash />
                   Delete
@@ -63,7 +61,12 @@ function DocumentList({
             )}
           </motion.div>
         );
-      })}
+      })
+      ) : (
+        <p className="rounded-2xl border border-white/15 bg-slate-900/45 p-3 text-xs text-slate-300">
+          {collapsed ? "0" : "No documents"}
+        </p>
+      )}
     </div>
   );
 }
