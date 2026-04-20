@@ -10,9 +10,8 @@ venv/
 .venv-1/
 
 # Vector DB / embeddings
-chroma.db/
-data/vectorstore/
-backend/chroma_data/
+chroma_db/
+backend/chroma_db/
 
 # OS files
 .DS_Store
@@ -21,7 +20,8 @@ Thumbs.db
 # Logs
 *.log
 
-# Optional: large files
+# Large files
+*.zip
 *.pdf
 *.pptx
 
@@ -29,6 +29,7 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 
-# Recovered backup copies
+# Backups / junk
+rag-/
 rag_clean/
-rag_clean.zip
+backend_backup_old/
