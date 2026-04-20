@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Dict, List
 
@@ -11,20 +12,28 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 BASE_DIR = Path(__file__).resolve().parent
-CHROMA_PATH = str(Path("./chroma_db").resolve())
+CHROMA_PATH = str((BASE_DIR / "chroma_db").resolve())
 COLLECTION_NAME = "rag_documents"
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
 _client = None
 _embedder: SentenceTransformer | None = None
 _collection_verified = False
+_client_lock = threading.Lock()
 
 
 def get_client():
     global _client
-    if _client is None:
-        db_dir = Path(CHROMA_PATH)
+    if _client is not None:
+        return _client
+
+    with _client_lock:
+        if _client is not None:
+            return _client
+
+        db_dir = Path(CHROMA_PATH).resolve()
         db_dir.mkdir(parents=True, exist_ok=True)
+
         try:
             _client = chromadb.PersistentClient(
                 path=str(db_dir),
@@ -35,17 +44,21 @@ def get_client():
             # Touch collection metadata once to fail fast on corruption.
             _client.get_or_create_collection(name=COLLECTION_NAME)
         except Exception:
+            _client = None
             try:
                 shutil.rmtree(db_dir, ignore_errors=True)
             except Exception:
                 pass
             db_dir.mkdir(parents=True, exist_ok=True)
+
             _client = chromadb.PersistentClient(
                 path=str(db_dir),
                 settings=Settings(
                     anonymized_telemetry=False,
                 ),
             )
+            _client.get_or_create_collection(name=COLLECTION_NAME)
+
     return _client
 
 
@@ -141,9 +154,15 @@ def query_chunks(
     )
 
 
-def get_all_records() -> Dict:
+def get_all_records():
     collection = get_collection()
-    return collection.get(include=["metadatas", "documents"])
+    
+    try:
+        data = collection.get()
+        return data
+    except Exception as e:
+        print("[DB ERROR]", e)
+        return {"metadatas": []}
 
 
 def delete_document(document_id: str) -> None:

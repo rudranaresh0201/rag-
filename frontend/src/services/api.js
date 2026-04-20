@@ -1,11 +1,4 @@
-import axios from "axios";
-
-const BASE_URL = "http://127.0.0.1:8003";
-
-const apiClient = axios.create({
-  baseURL: BASE_URL,
-  timeout: 120000,
-});
+export const API_BASE = "http://127.0.0.1:8004";
 
 function getBackendErrorMessage(payload, fallbackMessage) {
   if (!payload) {
@@ -52,51 +45,76 @@ export async function uploadPdf(file, onUploadProgress) {
   formData.append("file", file);
 
   try {
-    const response = await apiClient.post("/upload", formData, {
-      onUploadProgress,
+    const res = await fetch(`${API_BASE}/upload`, {
+      method: "POST",
+      body: formData,
     });
-    if (!response || !response.data) {
+    if (!res.ok) {
       throw new Error("Upload failed");
     }
-    return response.data;
+    const data = await res.json();
+    if (typeof onUploadProgress === "function") {
+      onUploadProgress({ loaded: 1, total: 1 });
+    }
+    return data;
   } catch (error) {
     throw buildApiError(error, "Upload failed");
   }
 }
 
 export async function queryRag(query) {
-  let response;
   try {
-    response = await apiClient.post("/query", { query });
+    const res = await fetch(`${API_BASE}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    if (!res.ok) {
+      throw new Error("Model is loading, please wait...");
+    }
+    const data = await res.json();
+    return data;
   } catch (error) {
     throw buildApiError(error, "Model is loading, please wait...");
   }
-  return response.data;
 }
 
 export const queryApi = async (query) => {
-  const res = await apiClient.post("/query", { query });
-  return res.data;
+  const res = await fetch(`${API_BASE}/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  const data = await res.json();
+  return data;
 };
 
 export async function queryRagByDocument(query, documentId) {
-  let response;
   try {
-    response = await apiClient.post("/query", {
-      query,
-      document_id: documentId,
+    const res = await fetch(`${API_BASE}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        document_id: documentId,
+      }),
     });
+    if (!res.ok) {
+      throw new Error("Model is loading, please wait...");
+    }
+    const data = await res.json();
+    return data;
   } catch (error) {
     throw buildApiError(error, "Model is loading, please wait...");
   }
-  return response.data;
 }
 
 export async function listDocuments() {
   try {
-    const res = await fetch("http://127.0.0.1:8003/documents");
+    const res = await fetch(`${API_BASE}/documents`);
+    if (!res.ok) throw new Error("Failed to fetch documents");
     const data = await res.json();
-    console.log("DOCUMENTS RAW:", data);
+    console.log("DOCUMENTS RESPONSE:", data);
     return data;
   } catch (error) {
     throw buildApiError(error, "Failed to load documents.");
@@ -109,11 +127,16 @@ export async function deleteDocument(documentId) {
 }
 
 export async function resetRag() {
-  let response;
   try {
-    response = await apiClient.delete("/reset");
+    const res = await fetch(`${API_BASE}/reset`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      throw new Error("Failed to clear documents.");
+    }
+    const data = await res.json();
+    return data;
   } catch (error) {
     throw buildApiError(error, "Failed to clear documents.");
   }
-  return response.data;
 }

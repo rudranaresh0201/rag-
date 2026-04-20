@@ -48,6 +48,11 @@ GENERIC_MATCH_WORDS = {
 }
 DOMAIN_QUERY_TRIGGERS = {"vehicle", "electric", "battery", "motor", "tractive"}
 DOMAIN_BOOST_TERMS = {"ev", "baja", "vehicle", "battery", "motor"}
+TITLE_NOISE_PHRASES = {
+    "design and operation of a modern smart city infrastructure",
+    "smart city infrastructure report",
+    "technical reference document",
+}
 
 
 class RetrievedChunk(TypedDict):
@@ -285,6 +290,22 @@ def _normalize_chunk_text(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def _is_repetitive_chunk(text: str) -> bool:
+    tokens = re.findall(r"[a-zA-Z0-9]+", str(text or "").lower())
+    if len(tokens) < 24:
+        return False
+
+    # Detect repeated phrase domination (e.g., repeated header/title lines).
+    trigrams = [" ".join(tokens[i : i + 3]) for i in range(0, len(tokens) - 2)]
+    if not trigrams:
+        return False
+    counts: dict[str, int] = {}
+    for phrase in trigrams:
+        counts[phrase] = counts.get(phrase, 0) + 1
+    max_repeat = max(counts.values()) if counts else 0
+    return max_repeat >= 3 and (float(max_repeat) / float(max(1, len(trigrams)))) >= 0.30
+
+
 def _clean_broken_sentences(text: str) -> str:
     normalized = _normalize_chunk_text(text)
     if not normalized:
@@ -519,7 +540,7 @@ def retrieve_chunks(
         normalize_embeddings=True,
     ).tolist()
 
-    top_k = min(12, total_chunks)
+    top_k = max(4, min(int(top_k), 12, total_chunks))
     where = {"doc_id": document_id} if document_id else None
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -539,18 +560,49 @@ def retrieve_chunks(
     all_scores: list[float] = []
 
     for idx, raw_chunk in enumerate(docs):
+        metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
         text = _normalize_chunk_text(str(raw_chunk or ""))
         if not text:
             continue
 
-        metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+        text = _clean_broken_sentences(text)
+        text = _normalize_chunk_text(text)
+        if not text:
+            continue
+
+        # Skip very short chunks.
+        word_count = len(text.split())
+        if word_count < 15:
+            continue
+
+        # Clean title/header phrases instead of dropping the entire chunk.
+        for phrase in TITLE_NOISE_PHRASES:
+            text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
+        text = _normalize_chunk_text(text)
+        if not text:
+            continue
+
+        normalized_text = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+        normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
+
+        # Content-based title/header filtering.
+        if re.search(r"\bpage\s*\d+\b", normalized_text) and word_count <= 60:
+            continue
+        if _is_repetitive_chunk(normalized_text):
+            continue
+
         distance_val = distances[idx] if idx < len(distances) else None
         semantic_score = 0.0
         if isinstance(distance_val, (int, float)):
-            semantic_score = max(0.0, 1.0 - float(distance_val))
+            semantic_score = max(0.0, 1.0 - (float(distance_val) / 2.0))
 
         chunk_tokens = _tokenize(text)
         keyword_hits = len(query_terms & chunk_tokens)
+
+        # Only drop chunks that are clearly irrelevant.
+        if isinstance(distance_val, (int, float)) and float(distance_val) >= 1.9 and keyword_hits == 0:
+            continue
+
         final_score = float(semantic_score) + (0.1 * float(keyword_hits))
 
         page_val = metadata.get("page")
@@ -618,22 +670,125 @@ def retrieve_chunks(
             }]
             break
 
-    print(f"[RAG] Final selected: {len(selected_chunks)}")
-    print(f"[RAG] Scores: {all_scores}")
+    chunks = selected_chunks
+    scores = [next((score for score, candidate in scored if candidate is chunk), 0.0) for chunk in chunks]
 
-    def build_context(chunks: list[RetrievedChunk]) -> str:
-        selected = chunks[:4]  # only top 4 chunks
+    seen = set()
+    unique_chunks = []
+    unique_scores = []
 
-        context = ""
-        for i, chunk in enumerate(selected):
-            text = str(chunk.get("text", "")).strip()
-            if text:
-                context += f"\nChunk {i+1}:\n{text[:400]}\n"
+    for chunk, score in zip(chunks, scores):
+        text = chunk.get("text", "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            unique_chunks.append(chunk)
+            unique_scores.append(score)
 
-        return context.strip()
+    chunks, scores = unique_chunks, unique_scores
 
-    context = build_context(selected_chunks)
-    if not context:
-        context = "No relevant context found in documents."
-    assert len(context) < 2000
-    return {"chunks": selected_chunks, "context": context.strip()}
+    def is_generic(text: str) -> bool:
+        t = text.lower()
+        return any(k in t for k in [
+            "foreword",
+            "welcome to",
+            "rulebook",
+            "page ",
+            "rev",
+            "figure",
+            "note",
+            "table of contents",
+            "introduction",
+            "the following are the important points"
+        ])
+
+    filtered = [(c, s) for c, s in zip(chunks, scores) if not is_generic(c.get("text", ""))]
+
+    if len(filtered) >= 2:
+        chunks, scores = zip(*filtered)
+        chunks, scores = list(chunks), list(scores)
+
+    def is_relevant(text: str) -> bool:
+        if not query_terms:
+            return True
+        t = text.lower()
+        chunk_tokens = _tokenize(t)
+        return bool(query_terms & chunk_tokens)
+
+    filtered = [(c, s) for c, s in zip(chunks, scores) if is_relevant(c.get("text", ""))]
+
+    if len(filtered) >= 2:
+        chunks, scores = zip(*filtered)
+        chunks, scores = list(chunks), list(scores)
+
+    # Step 1: sort all chunks by score
+    sorted_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+
+    unique_chunks = []
+    unique_scores = []
+    seen = set()
+
+    def normalize(t: str) -> str:
+        t = t.lower()
+        t = re.sub(r"\s+", " ", t)
+        t = re.sub(r"[^\w\s]", "", t)
+        return t.strip()
+
+    for i in sorted_idx:
+        chunk = chunks[i]
+        score = scores[i]
+
+        text = chunk.get("text", "").strip()
+        signature = normalize(text)[:200]
+
+        if signature not in seen:
+            seen.add(signature)
+            unique_chunks.append(chunk)
+            unique_scores.append(score)
+
+        # Stop when we have enough diverse chunks
+        if len(unique_chunks) == 4:
+            break
+
+    # FINAL OUTPUT USED FOR LLM
+    chunks = unique_chunks
+    scores = unique_scores
+
+    # Ensure minimum context after filtering: retain top original chunks when needed.
+    if len(chunks) < 3 and scored:
+        existing_signatures = {
+            normalize(chunk.get("text", "").strip())[:200]
+            for chunk in chunks
+            if chunk.get("text", "").strip()
+        }
+        for _, candidate_chunk in scored:
+            candidate_text = candidate_chunk.get("text", "").strip()
+            if not candidate_text:
+                continue
+            signature = normalize(candidate_text)[:200]
+            if signature in existing_signatures:
+                continue
+            chunks.append(candidate_chunk)
+            scores.append(0.0)
+            existing_signatures.add(signature)
+            if len(chunks) >= 3:
+                break
+
+    print("[RAG] FINAL CHUNKS AFTER DEDUP:")
+    for i, c in enumerate(chunks):
+        print(f"[RAG] Chunk {i+1}: {c['text'][:120]}")
+
+    if not chunks:
+        return {
+            "context": "",
+            "chunks": []
+        }
+
+    print(f"[RAG] Final selected: {len(chunks)}")
+    print(f"[RAG] Scores: {scores}")
+
+    context = ""
+    for chunk in chunks:
+        text = chunk.get("text", "").strip()
+        context += f"{text}\n\n"
+
+    return {"chunks": chunks, "context": context.strip()}

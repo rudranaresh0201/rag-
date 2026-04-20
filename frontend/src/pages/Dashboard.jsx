@@ -10,38 +10,24 @@ import ChatLayout from "../components/ChatLayout";
 import EvidencePanel from "../components/EvidencePanel";
 import Sidebar from "../components/Sidebar";
 import {
+  API_BASE,
   deleteDocument,
   listDocuments,
   queryRagByDocument,
   queryApi,
   resetRag,
-  uploadPdf,
 } from "../services/api";
 
 const TABS = ["Answer", "Evidence", "Insights"];
 
 function normalizeDocuments(payload) {
-  if (!Array.isArray(payload)) return [];
-
-  const map = new Map();
-
-  payload.forEach((row, i) => {
-    const id = String(row?.doc_id || "").trim();
-    if (!id) return;
-
-    if (!map.has(id)) {
-      map.set(id, {
-        id,
-        name: row?.file || `Document ${i + 1}`,
-        chunks: 0,
-      });
-    }
-
-    const doc = map.get(id);
-    doc.chunks += 1;
-  });
-
-  return Array.from(map.values());
+  return (payload?.documents || []).map((doc) => ({
+    id: doc.doc_id,
+    name: doc.filename,
+    chunks: doc.chunks,
+    size: doc.size,
+    uploaded_at: doc.uploaded_at,
+  }));
 }
 
 function normalizeSources(sources) {
@@ -135,24 +121,34 @@ function Dashboard() {
     setUploadProgress(0);
 
     try {
-      const response = await uploadPdf(file, (event) => {
-        if (!event.total) {
-          setUploadProgress(50);
-          return;
-        }
-        const value = Math.round((event.loaded * 100) / event.total);
-        setUploadProgress(Math.min(100, value));
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch(`${API_BASE}/upload`, {
+        method: "POST",
+        body: formData,
       });
 
-      console.log("UPLOAD RESPONSE:", response);
-      if (!response) {
-        setError("Upload failed");
-        return;
+      if (!response.ok) {
+        throw new Error("Upload failed");
+      }
+
+      setUploadProgress(100);
+      const data = await response.json();
+      console.log("UPLOAD RESPONSE:", data);
+
+      if (!data?.doc_id && typeof data?.chunks !== "number") {
+        throw new Error("Invalid response");
+      }
+
+      if (!data?.doc_id) {
+        throw new Error("Invalid response");
       }
 
       setError("");
       await refreshDocuments();
       setUploadProgress(100);
+      window.alert(`Upload successful: ${data.filename || file.name} (${data.chunks ?? 0} chunks)`);
     } catch (err) {
       setError(err?.message || "Upload failed");
     } finally {
