@@ -35,9 +35,7 @@ A full-stack Retrieval-Augmented Generation (RAG) system that lets users upload 
 
 ## 🎥 Demo Video
 
-Download and view: [Demo](pics/demo.mp4)
-
----
+https://github.com/user-attachments/assets/8da7fa2f-c267-4468-af9b-e761287af932
 
 ## ⚙️ Tech Stack
 
