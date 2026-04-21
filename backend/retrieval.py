@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, List, TypedDict
 
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
 from .db import get_collection, get_embedder
@@ -357,6 +358,60 @@ def _tokenize(text: str) -> set[str]:
     }
 
 
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> list[str]:
+    chunks: list[str] = []
+    cleaned = str(text or "")
+    start = 0
+    step = max(1, chunk_size - overlap)
+    while start < len(cleaned):
+        end = start + chunk_size
+        piece = cleaned[start:end]
+        if piece:
+            chunks.append(piece)
+        start += step
+    return chunks
+
+
+def _keyword_query_tokens(query: str) -> list[str]:
+    keywords = _extract_query_keywords(query)
+    if keywords:
+        return keywords
+    return [token for token in re.findall(r"[a-zA-Z0-9]+", str(query or "").lower()) if len(token) >= 3]
+
+
+def _tokenize_for_bm25(text: str) -> list[str]:
+    return [
+        _normalize_keyword_token(token)
+        for token in re.findall(r"[a-zA-Z0-9]+", str(text or "").lower())
+        if len(token) >= 2
+    ]
+
+
+def _length_quality_score(text: str) -> float:
+    words = len(str(text or "").split())
+    if words < 12:
+        return -0.8
+    if words < 20:
+        return -0.3
+    return min(1.0, float(words) / 120.0)
+
+
+def _hybrid_rerank_score(
+    query_terms: set[str],
+    text: str,
+    vector_score: float,
+    bm25_score: float,
+) -> float:
+    tokens = _tokenize(text)
+    keyword_overlap = len(query_terms & tokens)
+    return (1.4 * float(vector_score)) + (1.0 * float(bm25_score)) + (0.35 * float(keyword_overlap)) + _length_quality_score(text)
+
+
+def _has_generic_section_phrase(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(phrase in lowered for phrase in ["introduction", "conclusion", "summary"])
+
+
 def _rerank_score(semantic_score: float, chunk_text: str, query_terms: set[str]) -> float:
     # Semantic similarity is primary; keyword overlap only provides a light boost.
     chunk_tokens = _tokenize(chunk_text)
@@ -533,6 +588,9 @@ def retrieve_chunks(
         return {"chunks": [], "context": "No relevant context found in documents."}
 
     query_terms = set(_extract_query_keywords(query))
+    query_keywords = list(query_terms)
+    print(f"[RAG] Keywords: {query_keywords}")
+    query_tokens = _keyword_query_tokens(query)
     embed_model = _get_embed_model()
     query_embedding = embed_model.encode(
         query,
@@ -540,255 +598,194 @@ def retrieve_chunks(
         normalize_embeddings=True,
     ).tolist()
 
-    top_k = max(4, min(int(top_k), 12, total_chunks))
+    vector_k = min(max(5, int(top_k)), total_chunks)
     where = {"doc_id": document_id} if document_id else None
-    results = collection.query(
+    vector_results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=top_k,
+        n_results=vector_k,
         where=where,
         include=["documents", "metadatas", "distances"],
     )
 
-    docs = (results.get("documents") or [[]])[0] if results.get("documents") else []
-    metadatas = (results.get("metadatas") or [[]])[0] if results.get("metadatas") else []
-    distances = (results.get("distances") or [[]])[0] if results.get("distances") else []
+    docs = (vector_results.get("documents") or [[]])[0] if vector_results.get("documents") else []
+    metadatas = (vector_results.get("metadatas") or [[]])[0] if vector_results.get("metadatas") else []
+    distances = (vector_results.get("distances") or [[]])[0] if vector_results.get("distances") else []
 
     retrieved_count = len(docs)
-    print(f"[RAG] Retrieved: {retrieved_count}")
+    print(f"[RAG] Retrieved (vector): {retrieved_count}")
 
-    scored: list[tuple[float, RetrievedChunk]] = []
-    all_scores: list[float] = []
+    candidates_by_sig: dict[str, dict[str, Any]] = {}
+
+    def _register_candidate(
+        text: str,
+        metadata: dict[str, Any],
+        vector_score: float = 0.0,
+        bm25_score: float = 0.0,
+        chunk_idx: int | None = None,
+    ) -> None:
+        clean_text = _normalize_chunk_text(_clean_broken_sentences(text))
+        if not clean_text:
+            return
+
+        for phrase in TITLE_NOISE_PHRASES:
+            clean_text = re.sub(re.escape(phrase), " ", clean_text, flags=re.IGNORECASE)
+        clean_text = _normalize_chunk_text(clean_text)
+        if len(clean_text.split()) < 12:
+            return
+
+        signature = re.sub(r"\s+", " ", clean_text.lower())
+        if not signature:
+            return
+
+        page_val = metadata.get("page") if isinstance(metadata, dict) else None
+        page = page_val if isinstance(page_val, int) else int(page_val) if isinstance(page_val, str) and page_val.isdigit() else None
+        file_name = str((metadata or {}).get("file", "unknown.pdf"))
+        doc_id = str((metadata or {}).get("doc_id", ""))
+
+        existing = candidates_by_sig.get(signature)
+        if existing:
+            existing["vector_score"] = max(float(existing.get("vector_score", 0.0)), float(vector_score))
+            existing["bm25_score"] = max(float(existing.get("bm25_score", 0.0)), float(bm25_score))
+            return
+
+        enriched_meta = dict(metadata or {})
+        enriched_meta["source"] = file_name
+        enriched_meta["chunk_id"] = (
+            str(chunk_idx)
+            if chunk_idx is not None
+            else f"{doc_id or 'doc'}:{abs(hash(signature)) % 1000000}"
+        )
+
+        candidates_by_sig[signature] = {
+            "text": clean_text,
+            "file": file_name,
+            "doc_id": doc_id,
+            "page": page,
+            "metadata": enriched_meta,
+            "vector_score": float(vector_score),
+            "bm25_score": float(bm25_score),
+        }
 
     for idx, raw_chunk in enumerate(docs):
         metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
-        text = _normalize_chunk_text(str(raw_chunk or ""))
-        if not text:
-            continue
-
-        text = _clean_broken_sentences(text)
-        text = _normalize_chunk_text(text)
-        if not text:
-            continue
-
-        # Skip very short chunks.
-        word_count = len(text.split())
-        if word_count < 15:
-            continue
-
-        # Clean title/header phrases instead of dropping the entire chunk.
-        for phrase in TITLE_NOISE_PHRASES:
-            text = re.sub(re.escape(phrase), " ", text, flags=re.IGNORECASE)
-        text = _normalize_chunk_text(text)
-        if not text:
-            continue
-
-        normalized_text = re.sub(r"[^a-z0-9\s]", " ", text.lower())
-        normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
-
-        # Content-based title/header filtering.
-        if re.search(r"\bpage\s*\d+\b", normalized_text) and word_count <= 60:
-            continue
-        if _is_repetitive_chunk(normalized_text):
-            continue
-
         distance_val = distances[idx] if idx < len(distances) else None
         semantic_score = 0.0
         if isinstance(distance_val, (int, float)):
             semantic_score = max(0.0, 1.0 - (float(distance_val) / 2.0))
 
-        chunk_tokens = _tokenize(text)
-        keyword_hits = len(query_terms & chunk_tokens)
+        vector_windows = chunk_text(str(raw_chunk or ""), chunk_size=500, overlap=100)
+        for window_idx, window in enumerate(vector_windows):
+            _register_candidate(
+                text=window,
+                metadata=metadata,
+                vector_score=semantic_score,
+                bm25_score=0.0,
+                chunk_idx=window_idx,
+            )
 
-        # Only drop chunks that are clearly irrelevant.
-        if isinstance(distance_val, (int, float)) and float(distance_val) >= 1.9 and keyword_hits == 0:
+    all_results = collection.get(where=where, include=["documents", "metadatas"])
+    all_docs = all_results.get("documents") or []
+    all_metas = all_results.get("metadatas") or []
+
+    bm25_corpus: list[str] = []
+    bm25_meta: list[dict[str, Any]] = []
+    for idx, raw_doc in enumerate(all_docs):
+        metadata = all_metas[idx] if idx < len(all_metas) and isinstance(all_metas[idx], dict) else {}
+        for window_idx, window in enumerate(chunk_text(str(raw_doc or ""), chunk_size=500, overlap=100)):
+            cleaned_window = _normalize_chunk_text(window)
+            if len(cleaned_window.split()) < 12:
+                continue
+            bm25_corpus.append(cleaned_window)
+            bm25_meta.append({"meta": metadata, "chunk_idx": window_idx})
+
+    if bm25_corpus and query_tokens:
+        tokenized_chunks = [chunk.split() for chunk in bm25_corpus]
+        bm25 = BM25Okapi(tokenized_chunks)
+        bm25_scores = bm25.get_scores(query_tokens)
+        top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:5]
+        max_bm25 = max([bm25_scores[i] for i in top_bm25_indices], default=0.0)
+
+        for bm25_idx in top_bm25_indices:
+            raw_score = float(bm25_scores[bm25_idx])
+            normalized_bm25 = (raw_score / max_bm25) if max_bm25 > 0 else 0.0
+            _register_candidate(
+                text=bm25_corpus[bm25_idx],
+                metadata=bm25_meta[bm25_idx]["meta"],
+                vector_score=0.0,
+                bm25_score=normalized_bm25,
+                chunk_idx=int(bm25_meta[bm25_idx]["chunk_idx"]),
+            )
+
+    combined_candidates = list(candidates_by_sig.values())
+    if not combined_candidates:
+        return {"chunks": [], "context": "No relevant context found in documents."}
+
+    reranked: list[tuple[int, float, int, RetrievedChunk]] = []
+    for candidate in combined_candidates:
+        text = str(candidate.get("text", "")).strip()
+        if len(text.split()) < 12:
+            continue
+        if _is_repetitive_chunk(text):
+            continue
+        if _has_generic_section_phrase(text):
             continue
 
-        final_score = float(semantic_score) + (0.1 * float(keyword_hits))
+        score = _hybrid_rerank_score(
+            query_terms=query_terms,
+            text=text,
+            vector_score=float(candidate.get("vector_score", 0.0)),
+            bm25_score=float(candidate.get("bm25_score", 0.0)),
+        )
 
-        page_val = metadata.get("page")
-        page = page_val if isinstance(page_val, int) else int(page_val) if isinstance(page_val, str) and page_val.isdigit() else None
+        lowered_text = text.lower()
+        keyword_hits = sum(1 for word in query_keywords if word in lowered_text)
+        print(f"[RAG] Chunk keyword hits: {keyword_hits} | {text[:90]}")
 
-        scored.append(
+        # Strong keyword boost for concept-specific queries.
+        score += float(keyword_hits) * 2.0
+
+        chunk_len = len(text.split())
+
+        reranked.append(
             (
-                final_score,
+                keyword_hits,
+                score,
+                chunk_len,
                 {
                     "text": text,
-                    "file": str(metadata.get("file", "unknown.pdf")),
-                    "doc_id": str(metadata.get("doc_id", "")),
-                    "page": page,
-                    "metadata": metadata,
+                    "file": str(candidate.get("file", "unknown.pdf")),
+                    "doc_id": str(candidate.get("doc_id", "")),
+                    "page": candidate.get("page") if isinstance(candidate.get("page"), int) else None,
+                    "metadata": dict(candidate.get("metadata", {})),
                 },
             )
         )
-        all_scores.append(round(final_score, 4))
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    for idx, (_, chunk) in enumerate(scored[:5], start=1):
-        preview = _normalize_chunk_text(str(chunk.get("text", "")))[:200]
-        print(f"[RAG] Top chunk {idx}: {preview}")
+    # Priority sorting: keyword hits > hybrid score > chunk length.
+    reranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
 
-    desired_count = min(5, max(3, len(scored)))
+    # Combine vector+BM25 candidates and keep a compact clean set.
     selected_chunks: list[RetrievedChunk] = []
-    seen_texts: set[str] = set()
+    keyword_first = [item for item in reranked if item[0] > 0]
+    keyword_last = [item for item in reranked if item[0] == 0]
+    ordered_candidates = keyword_first + keyword_last
 
-    for _, chunk in scored:
-        text_key = _normalize_chunk_text(chunk.get("text", "")).lower()
-        if not text_key or text_key in seen_texts:
+    for _, _, _, chunk in ordered_candidates[:7]:
+        text = _normalize_chunk_text(chunk.get("text", ""))
+        if len(text.split()) < 12:
             continue
-
-        duplicate_like = False
-        for existing in selected_chunks:
-            existing_text = _normalize_chunk_text(existing.get("text", "")).lower()
-            if _is_near_duplicate(text_key, existing_text):
-                duplicate_like = True
-                break
-        if duplicate_like:
+        if any(_is_near_duplicate(text, existing.get("text", "")) for existing in selected_chunks):
             continue
-
-        seen_texts.add(text_key)
         selected_chunks.append(chunk)
-        if len(selected_chunks) >= desired_count:
+        if len(selected_chunks) >= 5:
             break
 
-    if not selected_chunks and scored:
-        selected_chunks = [scored[0][1]]
+    if not selected_chunks and reranked:
+        selected_chunks = [reranked[0][3]]
 
-    if not selected_chunks:
-        for idx, raw_chunk in enumerate(docs):
-            raw_text = _normalize_chunk_text(str(raw_chunk or ""))
-            if not raw_text:
-                continue
-            metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
-            page_val = metadata.get("page")
-            page = page_val if isinstance(page_val, int) else int(page_val) if isinstance(page_val, str) and page_val.isdigit() else None
-            selected_chunks = [{
-                "text": raw_text,
-                "file": str(metadata.get("file", "unknown.pdf")),
-                "doc_id": str(metadata.get("doc_id", "")),
-                "page": page,
-                "metadata": metadata,
-            }]
-            break
+    print("[RAG] FINAL CHUNKS AFTER HYBRID RERANK:")
+    for idx, chunk in enumerate(selected_chunks, start=1):
+        print(f"[RAG] Chunk {idx}: {chunk.get('text', '')[:120]}")
 
-    chunks = selected_chunks
-    scores = [next((score for score, candidate in scored if candidate is chunk), 0.0) for chunk in chunks]
-
-    seen = set()
-    unique_chunks = []
-    unique_scores = []
-
-    for chunk, score in zip(chunks, scores):
-        text = chunk.get("text", "").strip()
-        if text and text not in seen:
-            seen.add(text)
-            unique_chunks.append(chunk)
-            unique_scores.append(score)
-
-    chunks, scores = unique_chunks, unique_scores
-
-    def is_generic(text: str) -> bool:
-        t = text.lower()
-        return any(k in t for k in [
-            "foreword",
-            "welcome to",
-            "rulebook",
-            "page ",
-            "rev",
-            "figure",
-            "note",
-            "table of contents",
-            "introduction",
-            "the following are the important points"
-        ])
-
-    filtered = [(c, s) for c, s in zip(chunks, scores) if not is_generic(c.get("text", ""))]
-
-    if len(filtered) >= 2:
-        chunks, scores = zip(*filtered)
-        chunks, scores = list(chunks), list(scores)
-
-    def is_relevant(text: str) -> bool:
-        if not query_terms:
-            return True
-        t = text.lower()
-        chunk_tokens = _tokenize(t)
-        return bool(query_terms & chunk_tokens)
-
-    filtered = [(c, s) for c, s in zip(chunks, scores) if is_relevant(c.get("text", ""))]
-
-    if len(filtered) >= 2:
-        chunks, scores = zip(*filtered)
-        chunks, scores = list(chunks), list(scores)
-
-    # Step 1: sort all chunks by score
-    sorted_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-
-    unique_chunks = []
-    unique_scores = []
-    seen = set()
-
-    def normalize(t: str) -> str:
-        t = t.lower()
-        t = re.sub(r"\s+", " ", t)
-        t = re.sub(r"[^\w\s]", "", t)
-        return t.strip()
-
-    for i in sorted_idx:
-        chunk = chunks[i]
-        score = scores[i]
-
-        text = chunk.get("text", "").strip()
-        signature = normalize(text)[:200]
-
-        if signature not in seen:
-            seen.add(signature)
-            unique_chunks.append(chunk)
-            unique_scores.append(score)
-
-        # Stop when we have enough diverse chunks
-        if len(unique_chunks) == 4:
-            break
-
-    # FINAL OUTPUT USED FOR LLM
-    chunks = unique_chunks
-    scores = unique_scores
-
-    # Ensure minimum context after filtering: retain top original chunks when needed.
-    if len(chunks) < 3 and scored:
-        existing_signatures = {
-            normalize(chunk.get("text", "").strip())[:200]
-            for chunk in chunks
-            if chunk.get("text", "").strip()
-        }
-        for _, candidate_chunk in scored:
-            candidate_text = candidate_chunk.get("text", "").strip()
-            if not candidate_text:
-                continue
-            signature = normalize(candidate_text)[:200]
-            if signature in existing_signatures:
-                continue
-            chunks.append(candidate_chunk)
-            scores.append(0.0)
-            existing_signatures.add(signature)
-            if len(chunks) >= 3:
-                break
-
-    print("[RAG] FINAL CHUNKS AFTER DEDUP:")
-    for i, c in enumerate(chunks):
-        print(f"[RAG] Chunk {i+1}: {c['text'][:120]}")
-
-    if not chunks:
-        return {
-            "context": "",
-            "chunks": []
-        }
-
-    print(f"[RAG] Final selected: {len(chunks)}")
-    print(f"[RAG] Scores: {scores}")
-
-    context = ""
-    for chunk in chunks:
-        text = chunk.get("text", "").strip()
-        context += f"{text}\n\n"
-
-    return {"chunks": chunks, "context": context.strip()}
+    context = "\n\n".join(chunk.get("text", "").strip() for chunk in selected_chunks if chunk.get("text", "").strip())
+    return {"chunks": selected_chunks, "context": context}

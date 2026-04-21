@@ -21,14 +21,17 @@ os.environ["XDG_CACHE_HOME"] = HF_CACHE_DIR
 import logging
 from typing import Any
 
+import google.generativeai as genai
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.utils import logging as hf_logging
 
 MODEL_NAME = "microsoft/phi-2"
+USE_GEMINI = True
 GENERATION_MAX_TIME = float(os.getenv("LLM_MAX_TIME_SECONDS", "20"))
 SECTION_TIMEOUT_SECONDS = 20.0
 FAST_MODE = os.getenv("FAST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 SECTION_PROMPT = """
 You are an expert teacher.
 
@@ -202,6 +205,97 @@ def _clean_generated_answer(answer: str) -> str:
 
 def _split_sentences(text: str) -> list[str]:
     return [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", text.strip()) if segment.strip()]
+
+
+def _dedupe_sentences(text: str) -> str:
+    sentences = _split_sentences(text)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        normalized = re.sub(r"\s+", " ", sentence).strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(sentence.strip())
+    return " ".join(unique).strip()
+
+
+def _has_obvious_repetition(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not cleaned:
+        return False
+
+    if cleaned.count("summary:") > 1 or cleaned.count("key points:") > 1 or cleaned.count("explanation:") > 1:
+        return True
+
+    sentences = [re.sub(r"\s+", " ", s).strip().lower() for s in _split_sentences(cleaned) if s.strip()]
+    if len(sentences) >= 2 and len(set(sentences)) < len(sentences):
+        return True
+
+    words = re.findall(r"[a-z0-9]+", cleaned)
+    if len(words) >= 20:
+        ngram_counts: dict[str, int] = {}
+        for idx in range(0, len(words) - 4):
+            key = " ".join(words[idx:idx + 5])
+            ngram_counts[key] = ngram_counts.get(key, 0) + 1
+            if ngram_counts[key] >= 3:
+                return True
+
+    return False
+
+
+def _post_process_gemini_answer(answer: str) -> str:
+    text = _clean_generated_answer(answer)
+    summary, key_points, explanation = _extract_sections(text)
+
+    if summary or key_points or explanation:
+        cleaned_summary = _dedupe_sentences(summary)
+
+        cleaned_points: list[str] = []
+        seen_points: set[str] = set()
+        for point in key_points:
+            point_text = _dedupe_sentences(point)
+            normalized = re.sub(r"\s+", " ", point_text).strip().lower()
+            if not normalized or normalized in seen_points:
+                continue
+            seen_points.add(normalized)
+            cleaned_points.append(point_text)
+
+        cleaned_explanation = _dedupe_sentences(explanation)
+
+        if cleaned_summary and cleaned_explanation:
+            summary_norm = {
+                re.sub(r"\s+", " ", s).strip().lower()
+                for s in _split_sentences(cleaned_summary)
+            }
+            expl_sentences = [
+                s for s in _split_sentences(cleaned_explanation)
+                if re.sub(r"\s+", " ", s).strip().lower() not in summary_norm
+            ]
+            cleaned_explanation = " ".join(expl_sentences).strip()
+
+        blocks: list[str] = ["Summary:"]
+        blocks.append(cleaned_summary if cleaned_summary else "Not enough relevant information found.")
+        blocks.append("")
+        blocks.append("Key Points:")
+        if cleaned_points:
+            blocks.extend(f"- {point}" for point in cleaned_points[:4])
+        else:
+            blocks.append("- Not enough relevant information found.")
+        blocks.append("")
+        blocks.append("Explanation:")
+        blocks.append(cleaned_explanation if cleaned_explanation else "Not enough relevant information found.")
+        return "\n".join(blocks).strip()
+
+    return _dedupe_sentences(text)
+
+
+def generate_answer_gemini(prompt: str) -> str:
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(prompt)
+    if hasattr(response, "text") and response.text:
+        return response.text.strip()
+    return ""
 
 
 def _word_overlap_ratio(text_a: str, text_b: str) -> float:
@@ -596,7 +690,7 @@ def _get_model_and_tokenizer():
             raise
 
 
-def generate_answer(query: str, context: str) -> str:
+def generate_answer_local(query: str, context: str) -> str:
     try:
         tokenizer, model = _get_model_and_tokenizer()
 
@@ -788,6 +882,48 @@ Explanation:
         print("[LLM ERROR]", e)
         traceback.print_exc()
         return "Not enough relevant information found."
+
+
+def generate_answer(query: str, context: str) -> str:
+    prompt = f"""
+Answer the question using primarily the provided context.
+
+Context:
+{context}
+
+Question:
+{query}
+
+Instructions:
+- Base your answer on the context
+- Avoid repetition
+- Be clear and structured
+
+Respond in:
+Summary:
+Key Points:
+Explanation:
+"""
+
+    if USE_GEMINI:
+        try:
+            print("[LLM] Using Gemini")
+
+            answer = generate_answer_gemini(prompt)
+            answer = _post_process_gemini_answer(str(answer or ""))
+
+            # Basic validation
+            if not answer or len(answer) < 20 or _has_obvious_repetition(answer):
+                print("[LLM] Gemini weak output -> fallback")
+                return generate_answer_local(query, context)
+
+            return answer
+        except Exception as e:
+            print("[GEMINI ERROR]", e)
+            return generate_answer_local(query, context)
+
+    print("[LLM] Using Local Model")
+    return generate_answer_local(query, context)
 
 
 def _preload_model_once() -> None:
