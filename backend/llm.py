@@ -21,17 +21,20 @@ os.environ["XDG_CACHE_HOME"] = HF_CACHE_DIR
 import logging
 from typing import Any
 
-import google.generativeai as genai
+from openai import OpenAI
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.utils import logging as hf_logging
 
 MODEL_NAME = "microsoft/phi-2"
-USE_GEMINI = True
+USE_OPENROUTER = True
 GENERATION_MAX_TIME = float(os.getenv("LLM_MAX_TIME_SECONDS", "20"))
 SECTION_TIMEOUT_SECONDS = 20.0
 FAST_MODE = os.getenv("FAST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+)
 SECTION_PROMPT = """
 You are an expert teacher.
 
@@ -290,12 +293,76 @@ def _post_process_gemini_answer(answer: str) -> str:
     return _dedupe_sentences(text)
 
 
-def generate_answer_gemini(prompt: str) -> str:
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(prompt)
-    if hasattr(response, "text") and response.text:
-        return response.text.strip()
-    return ""
+def generate_answer_openrouter(prompt: str) -> str:
+    try:
+        response = client.chat.completions.create(
+            model="openrouter/free",
+            messages=[
+                {"role": "system", "content": "You are a precise technical assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        answer = str(response.choices[0].message.content or "").strip()
+        return answer
+    except Exception as e:
+        print("[OPENROUTER ERROR]", e)
+        return ""
+
+
+def _format_context(context: str) -> str:
+    raw_context = str(context or "")
+    chunks = [c.strip() for c in raw_context.split("\n") if c.strip()]
+    chunks = list(dict.fromkeys(chunks))
+    if not chunks:
+        return ""
+    return "\n---\n".join(chunks)
+
+
+def clean_sentences(text: str) -> str:
+    sentences = str(text or "").split(". ")
+    seen: set[str] = set()
+    result: list[str] = []
+    for sentence in sentences:
+        key = sentence.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(sentence.strip())
+    return ". ".join(result)
+
+
+def clean_formatting(text: str) -> str:
+    text = str(text or "")
+
+    # remove markdown bold
+    text = re.sub(r"\*\*", "", text)
+
+    # normalize headers
+    text = re.sub(r"Summary\s*:\s*", "Summary:\n", text)
+    text = re.sub(r"Key Points\s*:\s*", "Key Points:\n", text)
+    text = re.sub(r"Explanation\s*:\s*", "Explanation:\n", text)
+
+    # remove duplicate headers
+    text = re.sub(r"(Summary:\s*)+", "Summary:\n", text)
+    text = re.sub(r"(Key Points:\s*)+", "Key Points:\n", text)
+    text = re.sub(r"(Explanation:\s*)+", "Explanation:\n", text)
+
+    # fix broken transitions
+    text = re.sub(r"Key Points:\s*Explanation:", "Explanation:", text)
+
+    # remove repeated lines
+    lines = text.split("\n")
+    seen: set[str] = set()
+    clean_lines: list[str] = []
+
+    for line in lines:
+        lowered = line.strip().lower()
+        if lowered and lowered not in seen:
+            seen.add(lowered)
+            clean_lines.append(line.strip())
+
+    return "\n".join(clean_lines)
 
 
 def _word_overlap_ratio(text_a: str, text_b: str) -> float:
@@ -885,8 +952,12 @@ Explanation:
 
 
 def generate_answer(query: str, context: str) -> str:
+    context = _format_context(context)
+
     prompt = f"""
-Answer the question using primarily the provided context.
+You are a precise technical assistant.
+
+Use ONLY the context below.
 
 Context:
 {context}
@@ -895,32 +966,48 @@ Question:
 {query}
 
 Instructions:
-- Base your answer on the context
-- Avoid repetition
-- Be clear and structured
+- Do NOT use markdown symbols like ** or *
+- Do NOT repeat section headers
+- Each section must appear ONLY once
+- Avoid repeating the same sentence
+- Keep output clean and readable
 
-Respond in:
+Format:
+
 Summary:
 Key Points:
 Explanation:
 """
 
-    if USE_GEMINI:
+    if USE_OPENROUTER:
         try:
-            print("[LLM] Using Gemini")
+            print("[LLM] Using OpenRouter")
 
-            answer = generate_answer_gemini(prompt)
-            answer = _post_process_gemini_answer(str(answer or ""))
+            answer = generate_answer_openrouter(prompt)
 
-            # Basic validation
-            if not answer or len(answer) < 20 or _has_obvious_repetition(answer):
-                print("[LLM] Gemini weak output -> fallback")
-                return generate_answer_local(query, context)
+            if not answer or len(answer) < 30:
+                raise Exception("Weak output")
+
+            answer = clean_sentences(answer)
+            answer = clean_formatting(answer)
+
+            if "Summary:" not in answer:
+                answer = "Summary:\n" + answer
+
+            if "Key Points:" not in answer:
+                answer += "\n\nKey Points:\n- Information extracted from context"
+
+            if "Explanation:" not in answer:
+                answer += "\n\nExplanation:\n" + answer
 
             return answer
         except Exception as e:
-            print("[GEMINI ERROR]", e)
-            return generate_answer_local(query, context)
+            print("[OPENROUTER ERROR]", e)
+            print("[LLM] Falling back to local model")
+            local_output = generate_answer_local(query, context)
+            if not local_output or len(local_output) < 30:
+                return "Not enough reliable information found in the provided context."
+            return local_output
 
     print("[LLM] Using Local Model")
     return generate_answer_local(query, context)

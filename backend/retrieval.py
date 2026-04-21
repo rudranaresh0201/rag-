@@ -744,6 +744,12 @@ def retrieve_chunks(
         # Strong keyword boost for concept-specific queries.
         score += float(keyword_hits) * 2.0
 
+        if "layer" in query.lower():
+            if "layer" in lowered_text:
+                score += 5
+            else:
+                score -= 3
+
         chunk_len = len(text.split())
 
         reranked.append(
