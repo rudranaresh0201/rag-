@@ -1,80 +1,61 @@
-# DOCRAG
+# 🚀 RAGnosis — Ask With Evidence, Think With Structure
 
-A Retrieval-Augmented Generation (RAG) system for querying technical PDF documents using local inference.
-
-Driven engineering student focused on AI and automotive systems, building practical solutions using RAG, EV electronics, and scalable full-stack development.
+A full-stack Retrieval-Augmented Generation (RAG) system that lets users upload PDFs and ask questions with structured, context-grounded answers.
 
 ---
 
-## 🚀 Overview
+## ✨ Features
 
-DOCRAG is a full-stack RAG pipeline that:
-
-- Converts PDF documents into vector embeddings  
-- Retrieves semantically relevant context  
-- Generates structured answers using a local LLM  
-
-The system runs fully on-device — no external APIs, ensuring privacy and low-latency performance.
+- 📄 Upload and query multiple PDFs  
+- 🔍 Semantic search with vector embeddings  
+- 🧠 LLM-powered structured responses (Summary, Key Points, Explanation)  
+- 📊 Confidence scoring and evidence-backed answers  
+- ⚡ FastAPI backend + React frontend  
 
 ---
 
-## 🏗️ Architecture
+## 📸 Screenshots
 
-PDF → Chunking → Embeddings → ChromaDB → Retrieval → Context Filtering → LLM → Structured Answer
+### 🧭 Landing Interface
+![Landing](pics/landing.png)
 
 ---
 
-## 🧠 Features
+### 📂 Document Upload & Sidebar
+![Sidebar](pics/sidebar.png)
 
-- Upload PDF documents
-- Automatic chunking and embedding
-- Semantic search using vector database
-- Context filtering and ranking
-- LLM-based answer generation
-- Structured output (Summary, Key Points, Explanation)
-- Interactive React frontend
+---
+
+### 💬 Query + Structured Answer
+![Answer](pics/answer.png)
+
+---
+
+## 🎥 Demo Video
+
+Download and view: [Demo](pics/demo.mp4)
 
 ---
 
 ## ⚙️ Tech Stack
 
-- Backend: FastAPI (Python)
-- Embeddings: sentence-transformers (bge-base)
-- Vector DB: ChromaDB
-- LLM: TinyLlama (local inference)
-- Frontend: React
+- **Frontend:** React (Vite)  
+- **Backend:** FastAPI  
+- **Vector DB:** ChromaDB  
+- **Embeddings:** Sentence Transformers  
+- **LLM:** TinyLlama (local inference)  
 
 ---
 
-## 📌 Example Queries
+## 🚀 How to Run
 
-- Explain tractive system in electric vehicles  
-- Explain AIR (Accumulator Isolation Relay) working  
-- Explain EV system architecture  
-- Summarize smart city infrastructure  
-any query from any pdf user uploads
+```bash
+# Backend
+cd backend
+pip install -r requirements.txt
+uvicorn app:app --reload --port 8004
 
----
-
-## 🧠 Key Contributions
-
-- Built end-to-end RAG pipeline (PDF → retrieval → generation)
-- Implemented custom retrieval filtering and ranking
-- Reduced hallucinations using prompt engineering
-- Designed context cleaning and sentence selection pipeline
-- Integrated FastAPI backend with React frontend
-
----
-
-## 🔮 Future Work
-
-- Upgrade to larger models (Mistral, LLaMA)
-- Add source citations
-- Improve retrieval ranking
-- Streaming responses
-
----
-
-## 👨‍💻 Author
-
-Rudra Naresh
+# Frontend
+cd frontend
+npm install
+npm run dev
