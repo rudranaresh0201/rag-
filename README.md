@@ -16,8 +16,6 @@ A full-stack Retrieval-Augmented Generation (RAG) system that lets users upload 
 
 ## 📸 Screenshots
 
-### 🧭 Landing Interface
-![Landing](pics/landing.png)
 
 ---
 
@@ -28,6 +26,10 @@ A full-stack Retrieval-Augmented Generation (RAG) system that lets users upload 
 
 ### 💬 Query + Structured Answer
 ![Answer](pics/answer.png)
+
+
+### 🧭 Landing Interface
+![Landing](pics/landing.png)
 
 ---
 
