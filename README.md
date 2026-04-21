@@ -1,37 +1,43 @@
 # 🚀 RAGnosis — Ask With Evidence, Think With Structure
 
-A full-stack Retrieval-Augmented Generation (RAG) system that lets users upload PDFs and ask questions with structured, context-grounded answers.
+# RAGnosis — AI Research Workspace
+
+Hybrid Retrieval-Augmented Generation (RAG) system with keyword-aware reranking, multi-document querying, and structured LLM responses.
+
+Built with FastAPI, React, ChromaDB, and Gemini / local LLM fallback.
 
 ---
 
 ## ✨ Features
 
-- 📄 Upload and query multiple PDFs  
-- 🔍 Semantic search with vector embeddings  
-- 🧠 LLM-powered structured responses (Summary, Key Points, Explanation)  
-- 📊 Confidence scoring and evidence-backed answers  
-- ⚡ FastAPI backend + React frontend  
+- Hybrid retrieval (Vector + BM25)
+- Keyword-aware reranking for improved relevance
+- Structured responses (Summary, Key Points, Explanation)
+- Multi-document PDF querying
+- Local + API-based LLM support (Gemini / TinyLlama fallback) 
 
 ---
 
-## 📸 Screenshots
+## 📸 Demo
 
-
----
-
-### 📂 Document Upload & Sidebar
-![Sidebar](pics/sidebar.png)
-
----
-
-### 💬 Query + Structured Answer
-![Answer](pics/answer.png)
-
-
-### 🧭 Landing Interface
+### 🧠 Landing Page
 ![Landing](pics/landing.png)
 
+### 📂 Document Management Sidebar
+![Sidebar](pics/sidebar.png)
+
+### 🧠 Structured Answer Output
+![RAG Answer](pics/answer.png)
+
 ---
+
+## 🎥 Demo Video
+
+Due to GitHub size limits, the demo video is not stored in the repository.
+
+👉 It can be shared separately upon request.
+
+
 
 ## 🎥 Demo Video
 
