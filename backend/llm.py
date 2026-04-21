@@ -747,20 +747,37 @@ def generate_answer(query: str, context: str) -> str:
         if not text:
             return "Not enough relevant information found."
 
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+        raw_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+        sentences: list[str] = []
+        seen_sentences: set[str] = set()
+        for sentence in raw_sentences:
+            normalized_sentence = sentence.lower().strip()
+            if normalized_sentence in seen_sentences:
+                continue
+            seen_sentences.add(normalized_sentence)
+            sentences.append(sentence)
 
         if not sentences:
             sentences = [text]
 
-        summary = " ".join(sentences[:2])
-        points = sentences[2:5] if len(sentences) > 2 else []
-        explanation = " ".join(sentences[5:]) if len(sentences) > 5 else summary
+        if len(sentences) == 1:
+            summary = sentences[0]
+            points = []
+            explanation = sentences[0]
+        elif len(sentences) <= 3:
+            summary = sentences[0]
+            points = sentences[1:]
+            explanation = " ".join(sentences[1:])
+        else:
+            summary = sentences[0]
+            points = sentences[1:4]
+            explanation = " ".join(sentences[4:])
 
         return f"""Summary:
 {summary}
 
 Key Points:
-{chr(10).join(f"- {p}" for p in points) if points else "- " + summary}
+{chr(10).join(f"* {p}" for p in points)}
 
 Explanation:
 {explanation}
