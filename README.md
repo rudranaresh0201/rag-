@@ -1,4 +1,4 @@
-# 🚀 RAGnosis — Ask With Evidence, Think With Structure
+#  RAGnosis — Ask With Evidence, Think With Structure
 
 # RAGnosis — AI Research Workspace
 
@@ -8,7 +8,7 @@ Built with FastAPI, React, ChromaDB, and Gemini / local LLM fallback.
 
 ---
 
-## ✨ Features
+##  Features
 
 - Hybrid retrieval (Vector + BM25)
 - Keyword-aware reranking for improved relevance
@@ -18,32 +18,32 @@ Built with FastAPI, React, ChromaDB, and Gemini / local LLM fallback.
 
 ---
 
-## 📸 Demo
+##  Demo
 
-### 🧠 Landing Page
+###  Landing Page
 ![Landing](pics/landing.png)
 
-### 📂 Document Management Sidebar
+###  Document Management Sidebar
 ![Sidebar](pics/sidebar.png)
 
-### 🧠 Structured Answer Output
+### Structured Answer Output
 ![RAG Answer](pics/answer.png)
 
 ---
 
-## 🎥 Demo Video
+##  Demo Video
 
 Due to GitHub size limits, the demo video is not stored in the repository.
 
-👉 It can be shared separately upon request.
+It can be shared separately upon request.
 
 
 
-## 🎥 Demo Video
+##  Demo Video
 
 https://github.com/user-attachments/assets/8da7fa2f-c267-4468-af9b-e761287af932
 
-## ⚙️ Tech Stack
+##  Tech Stack
 
 - **Frontend:** React (Vite)  
 - **Backend:** FastAPI  
@@ -53,7 +53,7 @@ https://github.com/user-attachments/assets/8da7fa2f-c267-4468-af9b-e761287af932
 
 ---
 
-## 🚀 How to Run
+##  How to Run
 
 ```bash
 # Backend
