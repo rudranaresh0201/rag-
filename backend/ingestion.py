@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import logging
 import uuid
 from pathlib import Path
 from typing import TypedDict
@@ -11,14 +10,12 @@ try:
 except ImportError:
     fitz = None
 
-try:
-    from .db import embed_texts, get_collection
-    from .utils import chunk_text, clean_text
-except ImportError:
-    from db import embed_texts, get_collection
-    from utils import chunk_text, clean_text
+from .db import embed_texts, get_collection
+from .utils import chunk_text, clean_text
 
-logger = logging.getLogger(__name__)
+from .core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class InvalidPDFError(Exception):
@@ -65,7 +62,14 @@ def extract_text_from_pdf_path(pdf_path: str) -> str:
     return clean_text(text)
 
 
-def ingest_pdf(pdf_bytes: bytes, filename: str, file_size: int) -> IngestionResult:
+def ingest_pdf(
+    pdf_bytes: bytes,
+    filename: str,
+    file_size: int,
+    doc_id: str | None = None,
+    s3_key: str | None = None,
+    file_hash: str | None = None,
+) -> IngestionResult:
     logger.info("Starting PDF ingestion filename=%s size=%s", filename, file_size)
     text = extract_text_from_pdf(pdf_bytes)
     if not text:
@@ -77,7 +81,7 @@ def ingest_pdf(pdf_bytes: bytes, filename: str, file_size: int) -> IngestionResu
         raise InvalidPDFError("No valid text chunks were produced.")
 
     embeddings = embed_texts(chunks)
-    doc_id = str(uuid.uuid4())
+    doc_id = str(doc_id or uuid.uuid4())
     uploaded_at = datetime.now(timezone.utc).isoformat()
 
     ids = [f"{Path(filename).stem}-{uuid.uuid4()}" for _ in chunks]
@@ -88,14 +92,16 @@ def ingest_pdf(pdf_bytes: bytes, filename: str, file_size: int) -> IngestionResu
             "size": int(file_size),
             "uploaded_at": uploaded_at,
             "chunk_index": index,
+            "s3_key": s3_key,
+            "content_hash": file_hash or "",
         }
         for index, _ in enumerate(chunks)
     ]
 
     collection = get_collection()
     collection.add(ids=ids, documents=chunks, metadatas=metadatas, embeddings=embeddings)
-    print("CHUNKS STORED:", len(chunks))
-    print("TOTAL IN DB:", collection.count())
+    logger.info("CHUNKS STORED: %s", len(chunks))
+    logger.info("TOTAL IN DB: %s", collection.count())
     logger.info(
         "Completed PDF ingestion filename=%s size=%s chunks=%s doc_id=%s",
         filename,
@@ -113,7 +119,14 @@ def ingest_pdf(pdf_bytes: bytes, filename: str, file_size: int) -> IngestionResu
     }
 
 
-def ingest_pdf_file_path(pdf_path: str, filename: str, file_size: int) -> IngestionResult:
+def ingest_pdf_file_path(
+    pdf_path: str,
+    filename: str,
+    file_size: int,
+    doc_id: str | None = None,
+    s3_key: str | None = None,
+    file_hash: str | None = None,
+) -> IngestionResult:
     logger.info("Starting PDF ingestion filename=%s size=%s", filename, file_size)
     text = extract_text_from_pdf_path(pdf_path)
     if not text:
@@ -125,7 +138,7 @@ def ingest_pdf_file_path(pdf_path: str, filename: str, file_size: int) -> Ingest
         raise InvalidPDFError("No valid text chunks were produced.")
 
     embeddings = embed_texts(chunks)
-    doc_id = str(uuid.uuid4())
+    doc_id = str(doc_id or uuid.uuid4())
     uploaded_at = datetime.now(timezone.utc).isoformat()
 
     ids = [f"{Path(filename).stem}-{uuid.uuid4()}" for _ in chunks]
@@ -136,14 +149,16 @@ def ingest_pdf_file_path(pdf_path: str, filename: str, file_size: int) -> Ingest
             "size": int(file_size),
             "uploaded_at": uploaded_at,
             "chunk_index": index,
+            "s3_key": s3_key,
+            "content_hash": file_hash or "",
         }
         for index, _ in enumerate(chunks)
     ]
 
     collection = get_collection()
     collection.add(ids=ids, documents=chunks, metadatas=metadatas, embeddings=embeddings)
-    print("CHUNKS STORED:", len(chunks))
-    print("TOTAL IN DB:", collection.count())
+    logger.info("CHUNKS STORED: %s", len(chunks))
+    logger.info("TOTAL IN DB: %s", collection.count())
     logger.info(
         "Completed PDF ingestion filename=%s size=%s chunks=%s doc_id=%s",
         filename,
@@ -159,3 +174,5 @@ def ingest_pdf_file_path(pdf_path: str, filename: str, file_size: int) -> Ingest
         "size": int(file_size),
         "uploaded_at": uploaded_at,
     }
+
+

@@ -11,8 +11,10 @@ from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
+from .core.logging import get_logger
+
 BASE_DIR = Path(__file__).resolve().parent
-CHROMA_PATH = str((BASE_DIR / "chroma_db").resolve())
+CHROMA_PATH = os.getenv("CHROMA_PATH", str((BASE_DIR / "chroma_db").resolve()))
 COLLECTION_NAME = "rag_documents"
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 
@@ -20,6 +22,8 @@ _client = None
 _embedder: SentenceTransformer | None = None
 _collection_verified = False
 _client_lock = threading.Lock()
+
+logger = get_logger(__name__)
 
 
 def get_client():
@@ -161,7 +165,7 @@ def get_all_records():
         data = collection.get()
         return data
     except Exception as e:
-        print("[DB ERROR]", e)
+        logger.exception("[DB ERROR] %s", e)
         return {"metadatas": []}
 
 

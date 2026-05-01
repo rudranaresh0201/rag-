@@ -1,4 +1,18 @@
-export const API_BASE = "http://127.0.0.1:8004";
+export const API_BASE = "http://127.0.0.1:8000";
+
+const API_HEADERS = {
+  "X-API-Key": "12345",
+};
+
+async function apiFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...API_HEADERS,
+      ...(options.headers || {}),
+    },
+  });
+}
 
 function getBackendErrorMessage(payload, fallbackMessage) {
   if (!payload) {
@@ -45,12 +59,13 @@ export async function uploadPdf(file, onUploadProgress) {
   formData.append("file", file);
 
   try {
-    const res = await fetch(`${API_BASE}/upload`, {
+    const res = await apiFetch(`${API_BASE}/upload`, {
       method: "POST",
       body: formData,
     });
     if (!res.ok) {
-      throw new Error("Upload failed");
+      const text = await res.text();
+      throw new Error(`API error: ${res.status} ${text}`);
     }
     const data = await res.json();
     if (typeof onUploadProgress === "function") {
@@ -62,15 +77,16 @@ export async function uploadPdf(file, onUploadProgress) {
   }
 }
 
-export async function queryRag(query) {
+export async function queryApi(query) {
   try {
-    const res = await fetch(`${API_BASE}/query`, {
+    const res = await apiFetch(`${API_BASE}/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query }),
     });
     if (!res.ok) {
-      throw new Error("Model is loading, please wait...");
+      const text = await res.text();
+      throw new Error(`API error: ${res.status} ${text}`);
     }
     const data = await res.json();
     return data;
@@ -79,19 +95,9 @@ export async function queryRag(query) {
   }
 }
 
-export const queryApi = async (query) => {
-  const res = await fetch(`${API_BASE}/query`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
-  });
-  const data = await res.json();
-  return data;
-};
-
 export async function queryRagByDocument(query, documentId) {
   try {
-    const res = await fetch(`${API_BASE}/query`, {
+    const res = await apiFetch(`${API_BASE}/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -100,7 +106,8 @@ export async function queryRagByDocument(query, documentId) {
       }),
     });
     if (!res.ok) {
-      throw new Error("Model is loading, please wait...");
+      const text = await res.text();
+      throw new Error(`API error: ${res.status} ${text}`);
     }
     const data = await res.json();
     return data;
@@ -111,8 +118,13 @@ export async function queryRagByDocument(query, documentId) {
 
 export async function listDocuments() {
   try {
-    const res = await fetch(`${API_BASE}/documents`);
-    if (!res.ok) throw new Error("Failed to fetch documents");
+    const res = await apiFetch(`${API_BASE}/documents`, {
+      method: "GET",
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`API error: ${res.status} ${text}`);
+    }
     const data = await res.json();
     console.log("DOCUMENTS RESPONSE:", data);
     return data;
@@ -121,18 +133,85 @@ export async function listDocuments() {
   }
 }
 
+export function pollTaskStatus(taskId, { onDone, onError, intervalMs = 2000 } = {}) {
+  if (!taskId) {
+    onError?.(new Error("Missing task id"));
+    return () => {};
+  }
+
+  let stopped = false;
+  let timer = null;
+
+  const stop = () => {
+    stopped = true;
+    if (timer) {
+      window.clearTimeout(timer);
+    }
+  };
+
+  const poll = async () => {
+    if (stopped) {
+      return;
+    }
+
+    try {
+      const res = await apiFetch(`${API_BASE}/task/${taskId}`, {
+        method: "GET",
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`API error: ${res.status} ${text}`);
+      }
+      const data = await res.json();
+      const status = data?.status;
+
+      if (status === "done") {
+        stop();
+        onDone?.(data);
+        return;
+      }
+
+      if (status === "failed") {
+        stop();
+        onError?.(new Error("Processing failed"));
+        return;
+      }
+
+      timer = window.setTimeout(poll, intervalMs);
+    } catch (error) {
+      stop();
+      onError?.(buildApiError(error, "Failed to check task status"));
+    }
+  };
+
+  poll();
+  return stop;
+}
+
 export async function deleteDocument(documentId) {
   if (!documentId) return null;
-  return null;
+  try {
+    const res = await apiFetch(`${API_BASE}/documents/${documentId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`API error: ${res.status} ${text}`);
+    }
+    return await res.json();
+  } catch (error) {
+    throw buildApiError(error, "Failed to delete document.");
+  }
 }
 
 export async function resetRag() {
   try {
-    const res = await fetch(`${API_BASE}/reset`, {
+    const res = await apiFetch(`${API_BASE}/reset?confirm=true`, {
       method: "DELETE",
     });
     if (!res.ok) {
-      throw new Error("Failed to clear documents.");
+      const text = await res.text();
+      throw new Error(`API error: ${res.status} ${text}`);
     }
     const data = await res.json();
     return data;

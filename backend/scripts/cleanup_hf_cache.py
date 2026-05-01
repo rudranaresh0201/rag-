@@ -4,11 +4,13 @@ import os
 import shutil
 from pathlib import Path
 
-# User-requested path and commonly used Windows HF cache path.
-TARGET_PATHS = [
-    Path(r"C:\Users\Rudra.cache\huggingface"),
-    Path(r"C:\Users\Rudra\.cache\huggingface"),
-]
+def _get_target_paths() -> list[Path]:
+    raw = os.getenv("HF_CACHE_DIRS", "").strip()
+    if raw:
+        return [Path(path.strip()) for path in raw.split(",") if path.strip()]
+
+    home = Path.home()
+    return [home / ".cache" / "huggingface"]
 
 
 def format_size(num_bytes: int) -> str:
@@ -34,8 +36,12 @@ def directory_size_bytes(path: Path) -> int:
 
 
 def is_safe_to_delete(path: Path) -> bool:
-    path_str = str(path).lower()
-    return path_str.startswith(r"c:\users\rudra") and "huggingface" in path_str
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    home = Path.home().resolve()
+    return str(resolved).startswith(str(home)) and "huggingface" in str(resolved).lower()
 
 
 def delete_cache_path(path: Path) -> None:
@@ -55,7 +61,7 @@ def delete_cache_path(path: Path) -> None:
 
 
 if __name__ == "__main__":
-    for target in TARGET_PATHS:
+    for target in _get_target_paths():
         try:
             delete_cache_path(target)
         except Exception as exc:

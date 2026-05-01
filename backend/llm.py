@@ -8,23 +8,25 @@ import warnings
 from difflib import SequenceMatcher
 from pathlib import Path
 
-HF_CACHE_DIR = "D:/huggingface_cache"
-os.environ["HF_HOME"] = HF_CACHE_DIR
-os.environ["TRANSFORMERS_CACHE"] = HF_CACHE_DIR
-os.environ["HUGGINGFACE_HUB_CACHE"] = HF_CACHE_DIR
-os.environ["HF_HUB_CACHE"] = HF_CACHE_DIR
-os.environ["HF_DATASETS_CACHE"] = HF_CACHE_DIR
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-os.environ["HF_HUB_DISABLE_XET"] = "1"
-os.environ["XDG_CACHE_HOME"] = HF_CACHE_DIR
+HF_CACHE_DIR = os.getenv("HF_CACHE_DIR", "").strip()
+if HF_CACHE_DIR:
+    os.environ["HF_HOME"] = HF_CACHE_DIR
+    os.environ["TRANSFORMERS_CACHE"] = HF_CACHE_DIR
+    os.environ["HUGGINGFACE_HUB_CACHE"] = HF_CACHE_DIR
+    os.environ["HF_HUB_CACHE"] = HF_CACHE_DIR
+    os.environ["HF_DATASETS_CACHE"] = HF_CACHE_DIR
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    os.environ["XDG_CACHE_HOME"] = HF_CACHE_DIR
 
-import logging
 from typing import Any
 
 from openai import OpenAI
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.utils import logging as hf_logging
+
+from .core.logging import get_logger
 
 MODEL_NAME = "microsoft/phi-2"
 USE_OPENROUTER = True
@@ -92,38 +94,16 @@ Question:
 _tokenizer: Any | None = None
 _model: Any | None = None
 _model_load_lock = threading.Lock()
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 hf_logging.set_verbosity_error()
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
-print("Using HuggingFace cache at D:/huggingface_cache")
+if HF_CACHE_DIR:
+    logger.info("Using HuggingFace cache at %s", HF_CACHE_DIR)
 
 
 def _normalize_path(path_value: str) -> str:
     return str(Path(path_value).as_posix()).lower().rstrip("/")
-
-
-def _assert_cache_is_d_drive() -> None:
-    expected = _normalize_path(HF_CACHE_DIR)
-    hf_home = _normalize_path(os.environ.get("HF_HOME", ""))
-    if hf_home != expected:
-        raise RuntimeError(
-            f"HF_HOME must be '{HF_CACHE_DIR}', got: {os.environ.get('HF_HOME', '')}"
-        )
-
-    tracked = {
-        "TRANSFORMERS_CACHE": os.environ.get("TRANSFORMERS_CACHE", ""),
-        "HUGGINGFACE_HUB_CACHE": os.environ.get("HUGGINGFACE_HUB_CACHE", ""),
-        "HF_DATASETS_CACHE": os.environ.get("HF_DATASETS_CACHE", ""),
-        "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME", ""),
-    }
-
-    for key, value in tracked.items():
-        if not value:
-            continue
-        normalized = _normalize_path(value)
-        if not normalized.startswith(expected):
-            print(f"Warning: cache path not on D drive: {key} -> {value}")
 
 def _build_prompt(query: str, context: str) -> str:
     return PROMPT.format(context=context[:2000], query=query)
@@ -306,7 +286,7 @@ def generate_answer_openrouter(prompt: str) -> str:
         answer = str(response.choices[0].message.content or "").strip()
         return answer
     except Exception as e:
-        print("[OPENROUTER ERROR]", e)
+        logger.exception("[OPENROUTER ERROR] %s", e)
         return ""
 
 
@@ -732,7 +712,7 @@ def _get_model_and_tokenizer():
             return _tokenizer, _model
 
         try:
-            print("Loading TinyLlama...")
+            logger.info("Loading TinyLlama...")
 
             model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
@@ -746,13 +726,13 @@ def _get_model_and_tokenizer():
 
             _model.to("cpu")
 
-            print("MODEL LOADED SUCCESSFULLY")
+            logger.info("MODEL LOADED SUCCESSFULLY")
 
             return _tokenizer, _model
 
         except Exception as e:
             import traceback
-            print("\nMODEL LOAD ERROR:")
+            logger.exception("MODEL LOAD ERROR")
             traceback.print_exc()
             raise
 
@@ -848,8 +828,7 @@ def generate_answer_local(query: str, context: str) -> str:
             question=query
         )
 
-        print("[DEBUG] FINAL PROMPT SENT TO LLM:")
-        print(prompt[:1000])
+        logger.debug("[DEBUG] FINAL PROMPT SENT TO LLM: %s", prompt[:1000])
 
         # Tokenize FULL prompt
         inputs = tokenizer(
@@ -900,8 +879,7 @@ def generate_answer_local(query: str, context: str) -> str:
         if not answer:
             return "Not enough relevant information found."
 
-        print("[DEBUG] CLEAN LLM OUTPUT:")
-        print(answer)
+        logger.debug("[DEBUG] CLEAN LLM OUTPUT: %s", answer)
 
         text = answer.strip()
 
@@ -946,7 +924,7 @@ Explanation:
 
     except Exception as e:
         import traceback
-        print("[LLM ERROR]", e)
+        logger.exception("[LLM ERROR] %s", e)
         traceback.print_exc()
         return "Not enough relevant information found."
 
@@ -981,7 +959,7 @@ Explanation:
 
     if USE_OPENROUTER:
         try:
-            print("[LLM] Using OpenRouter")
+            logger.info("[LLM] Using OpenRouter")
 
             answer = generate_answer_openrouter(prompt)
 
@@ -1002,14 +980,14 @@ Explanation:
 
             return answer
         except Exception as e:
-            print("[OPENROUTER ERROR]", e)
-            print("[LLM] Falling back to local model")
+            logger.exception("[OPENROUTER ERROR] %s", e)
+            logger.info("[LLM] Falling back to local model")
             local_output = generate_answer_local(query, context)
             if not local_output or len(local_output) < 30:
                 return "Not enough reliable information found in the provided context."
             return local_output
 
-    print("[LLM] Using Local Model")
+    logger.info("[LLM] Using Local Model")
     return generate_answer_local(query, context)
 
 

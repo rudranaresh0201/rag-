@@ -9,10 +9,12 @@ import AnswerPanel from "../components/AnswerPanel";
 import ChatLayout from "../components/ChatLayout";
 import EvidencePanel from "../components/EvidencePanel";
 import Sidebar from "../components/Sidebar";
+import StatusBanner from "../components/StatusBanner";
 import {
-  API_BASE,
   deleteDocument,
   listDocuments,
+  pollTaskStatus,
+  uploadPdf,
   queryRagByDocument,
   queryApi,
   resetRag,
@@ -66,6 +68,8 @@ function Dashboard() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [processingDoc, setProcessingDoc] = useState(null);
+  const [rebuilding, setRebuilding] = useState(false);
   const [querying, setQuerying] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState("");
@@ -121,34 +125,33 @@ function Dashboard() {
     setUploadProgress(0);
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(`${API_BASE}/upload`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error("Upload failed");
-      }
-
-      setUploadProgress(100);
-      const data = await response.json();
+      const data = await uploadPdf(file, () => setUploadProgress(100));
       console.log("UPLOAD RESPONSE:", data);
 
-      if (!data?.doc_id && typeof data?.chunks !== "number") {
-        throw new Error("Invalid response");
+      if (data?.task_id) {
+        const taskId = data.task_id;
+        setProcessingDoc({ name: file.name, taskId });
+        pollTaskStatus(taskId, {
+          intervalMs: 2000,
+          onDone: async () => {
+            setProcessingDoc(null);
+            await refreshDocuments();
+          },
+          onError: (err) => {
+            setProcessingDoc(null);
+            setError(err?.message || "Processing failed");
+          },
+        });
+        return;
       }
 
-      if (!data?.doc_id) {
-        throw new Error("Invalid response");
+      if (data?.doc_id || typeof data?.chunks === "number") {
+        await refreshDocuments();
+        setUploadProgress(100);
+        return;
       }
 
-      setError("");
-      await refreshDocuments();
-      setUploadProgress(100);
-      window.alert(`Upload successful: ${data.filename || file.name} (${data.chunks ?? 0} chunks)`);
+      throw new Error("Invalid response");
     } catch (err) {
       setError(err?.message || "Upload failed");
     } finally {
@@ -242,6 +245,7 @@ function Dashboard() {
       uploadedFiles={sortedFiles}
       activeDocumentId={activeDocumentId}
       uploading={uploading}
+      processingDoc={processingDoc}
       uploadProgress={uploadProgress}
       onUpload={handleUpload}
       onSelectDocument={setActiveDocumentId}
@@ -326,7 +330,7 @@ function Dashboard() {
 
       <div className="scrollbar-thin flex-1 overflow-y-auto pr-1">
         {activeTab === "Answer" && (
-          <AnswerPanel answer={latestAnswer} query={latestQuery} loading={querying} />
+          <AnswerPanel answer={latestAnswer} query={latestQuery} loading={querying} sources={latestSources} />
         )}
 
         {activeTab === "Evidence" && <EvidencePanel sources={latestSources} query={latestQuery} />}
@@ -386,6 +390,7 @@ function Dashboard() {
       />
 
       <div className="relative mx-auto max-w-[1640px] p-4 md:p-6">
+        <StatusBanner rebuilding={rebuilding} processingDoc={processingDoc} />
         {error && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}

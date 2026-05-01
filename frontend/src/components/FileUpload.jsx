@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 import { useRef, useState } from "react";
 import { HiArrowUpTray, HiMiniArrowPath } from "react-icons/hi2";
 
-function FileUpload({ onUpload, uploading, uploadProgress, collapsed = false }) {
+function FileUpload({ onUpload, uploading, processingDoc, uploadProgress, collapsed = false }) {
   const inputRef = useRef(null);
   const [dragActive, setDragActive] = useState(false);
 
@@ -41,17 +41,22 @@ function FileUpload({ onUpload, uploading, uploadProgress, collapsed = false }) 
         accept="application/pdf"
         className="hidden"
         onChange={(event) => handleFiles(event.target.files)}
-        disabled={uploading}
+        disabled={uploading || Boolean(processingDoc)}
       />
 
       <button
         type="button"
-        disabled={uploading}
+        disabled={uploading || Boolean(processingDoc)}
         onClick={() => inputRef.current?.click()}
         className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-indigo-300/35 bg-indigo-500/15 px-3 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-indigo-100 transition hover:bg-indigo-500/25 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {uploading ? <HiMiniArrowPath className="animate-spin text-base" /> : <HiArrowUpTray className="text-base" />}
-        {!collapsed && (uploading ? "Uploading..." : "Upload PDF")}
+        {uploading || processingDoc ? (
+          <HiMiniArrowPath className="animate-spin text-base" />
+        ) : (
+          <HiArrowUpTray className="text-base" />
+        )}
+        {!collapsed &&
+          (uploading ? "Uploading..." : processingDoc ? "Processing..." : "Upload PDF")}
       </button>
 
       {!collapsed && (

@@ -5,7 +5,10 @@ import subprocess
 import sys
 from typing import Set
 
+from .core.logging import get_logger
+
 PORT = "8003"
+logger = get_logger(__name__)
 
 
 def find_listening_pids(port: str) -> Set[str]:
@@ -36,19 +39,19 @@ def main() -> int:
     # Step 1: Find process(es) using the target port.
     pids = find_listening_pids(PORT)
     if not pids:
-        print(f"No process using port {PORT}")
+        logger.info("No process using port %s", PORT)
         return 0
 
     # Step 2: Kill each PID and retry to handle auto-respawn.
     for attempt in range(1, 4):
         pids = find_listening_pids(PORT)
         if not pids:
-            print("Done. Port is free.")
+            logger.info("Done. Port is free.")
             return 0
 
-        print(f"Attempt {attempt}: found PID(s) {', '.join(sorted(pids))}")
+        logger.info("Attempt %s: found PID(s) %s", attempt, ", ".join(sorted(pids)))
         for pid in sorted(pids):
-            print(f"Killing PID: {pid}")
+            logger.info("Killing PID: %s", pid)
             subprocess.run(
                 f"taskkill /F /PID {pid}",
                 shell=True,
@@ -59,14 +62,13 @@ def main() -> int:
 
     remaining = find_listening_pids(PORT)
     if remaining:
-        print(
-            "Port is still in use by PID(s): "
-            + ", ".join(sorted(remaining))
-            + ". Run terminal as Administrator and try again."
+        logger.warning(
+            "Port is still in use by PID(s): %s. Run terminal as Administrator and try again.",
+            ", ".join(sorted(remaining)),
         )
         return 1
 
-    print("Done. Port is free.")
+    logger.info("Done. Port is free.")
     return 0
 
 

@@ -72,7 +72,7 @@ function highlightKeywords(text, keywords) {
   });
 }
 
-function AnswerPanel({ answer, query, loading }) {
+function AnswerPanel({ answer, query, loading, sources = [] }) {
   const sections = useMemo(() => splitAnswerSections(answer), [answer]);
 
   const keywords = useMemo(
@@ -143,6 +143,30 @@ function AnswerPanel({ answer, query, loading }) {
           {highlightKeywords(typedExplanation, keywords)}
           {typedExplanation.length < sections.explanation.length && <span className="type-caret" />}
         </p>
+      </section>
+
+      <section className="rounded-3xl border border-white/15 bg-white/5 p-5 backdrop-blur-xl">
+        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Sources</p>
+        {sources.length ? (
+          <div className="mt-3 space-y-2">
+            {sources.map((source, index) => (
+              <div
+                key={`${source.document}-${index}`}
+                className="rounded-2xl border border-white/10 bg-slate-950/45 px-3 py-2"
+              >
+                <p className="text-xs text-slate-300">
+                  {source.document}
+                  {Number.isFinite(source.page) ? ` · Page ${source.page}` : ""}
+                </p>
+                <p className="mt-1 text-sm text-slate-100">
+                  {source.text}
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-2 text-sm text-slate-300">No sources available.</p>
+        )}
       </section>
     </motion.div>
   );

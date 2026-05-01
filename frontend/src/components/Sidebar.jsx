@@ -19,6 +19,7 @@ function Sidebar({
   uploadedFiles,
   activeDocumentId,
   uploading,
+  processingDoc,
   uploadProgress,
   onUpload,
   onSelectDocument,
@@ -74,6 +75,7 @@ function Sidebar({
       <FileUpload
         onUpload={onUpload}
         uploading={uploading}
+        processingDoc={processingDoc}
         uploadProgress={uploadProgress}
         collapsed={collapsed}
       />
@@ -101,7 +103,7 @@ function Sidebar({
         <button
           type="button"
           onClick={onClearAll}
-          disabled={clearing || uploading || uploadedFiles.length === 0}
+          disabled={clearing || uploading || Boolean(processingDoc) || uploadedFiles.length === 0}
           className="w-full rounded-xl border border-fuchsia-300/35 bg-fuchsia-500/12 px-3 py-2 text-xs font-semibold uppercase tracking-[0.13em] text-fuchsia-100 transition hover:bg-fuchsia-500/20 disabled:cursor-not-allowed disabled:opacity-50"
           title="Clear all documents"
         >
