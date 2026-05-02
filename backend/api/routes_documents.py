@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from deps import require_api_key
+from api.deps import require_api_key
 from core.logging import get_logger
 from db import get_all_records, get_collection
 from storage import list_all_pdfs_in_r2, delete_pdf_from_r2
@@ -103,3 +103,4 @@ def delete_document(doc_id: str, _: None = Depends(require_api_key)) -> dict[str
     except Exception as exc:
         logger.exception("[ERROR] Delete failed: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error")
+

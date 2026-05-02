@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from deps import require_api_key
+from api.deps import require_api_key
 from core.logging import get_logger
 from models.schemas import QueryRequest
 from services.rebuild_service import is_rebuild_locked
@@ -60,3 +60,4 @@ async def query_endpoint(
     except Exception as exc:
         logger.exception("[ERROR] /query failed: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error")
+

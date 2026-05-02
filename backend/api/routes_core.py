@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 
-from deps import require_api_key
+from api.deps import require_api_key
 from core.config import get_max_upload_bytes
 from core.logging import get_logger
 from db import get_collection, reset_database
@@ -148,3 +148,4 @@ def reset(confirm: bool = False, _: None = Depends(require_api_key)) -> dict[str
         return {"status": "success"}
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
+
