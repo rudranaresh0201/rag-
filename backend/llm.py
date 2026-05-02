@@ -95,7 +95,7 @@ _tokenizer: Any | None = None
 _model: Any | None = None
 _model_load_lock = threading.Lock()
 logger = get_logger(__name__)
-hf_logging.set_verbosity_error()
+# hf_logging.set_verbosity_error()
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 
 if HF_CACHE_DIR:
