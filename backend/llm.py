@@ -276,7 +276,7 @@ def _post_process_gemini_answer(answer: str) -> str:
 def generate_answer_openrouter(prompt: str) -> str:
     try:
         response = client.chat.completions.create(
-            model="openrouter/free",
+            model="meta-llama/llama-3.1-8b-instruct:free",
             messages=[
                 {"role": "system", "content": "You are a precise technical assistant."},
                 {"role": "user", "content": prompt},
