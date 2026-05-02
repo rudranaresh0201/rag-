@@ -276,7 +276,7 @@ def _post_process_gemini_answer(answer: str) -> str:
 def generate_answer_openrouter(prompt: str) -> str:
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-8b-instruct:free",
+            model="mistralai/mistral-7b-instruct:free",
             messages=[
                 {"role": "system", "content": "You are a precise technical assistant."},
                 {"role": "user", "content": prompt},
@@ -982,7 +982,7 @@ Explanation:
         except Exception as e:
             logger.exception("[OPENROUTER ERROR] %s", e)
             logger.info("[LLM] Falling back to local model")
-            local_output = generate_answer_local(query, context)
+            # local_output = generate_answer_local(query, context)
             if not local_output or len(local_output) < 30:
                 return "Not enough reliable information found in the provided context."
             return local_output
