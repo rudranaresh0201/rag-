@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi import Request
 
-from .core.config import get_allowed_origins
+from  core.config import get_allowed_origins
 from .core.logging import get_logger
 from .db import get_embedder
 from .retrieval import warmup_bm25_index
