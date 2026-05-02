@@ -1,6 +1,6 @@
 ---
 title: RAGnosis
-emoji: ??
+emoji: rocket
 colorFrom: purple
 colorTo: blue
 sdk: docker
