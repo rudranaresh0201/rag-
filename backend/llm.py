@@ -276,7 +276,7 @@ def _post_process_gemini_answer(answer: str) -> str:
 def generate_answer_openrouter(prompt: str) -> str:
     try:
         response = client.chat.completions.create(
-            model="mistralai/mistral-7b-instruct:free",
+            model="deepseek/deepseek-r1:free",
             messages=[
                 {"role": "system", "content": "You are a precise technical assistant."},
                 {"role": "user", "content": prompt},
@@ -930,6 +930,7 @@ Explanation:
 
 
 def generate_answer(query: str, context: str) -> str:
+    local_output = None
     context = _format_context(context)
 
     prompt = f"""
