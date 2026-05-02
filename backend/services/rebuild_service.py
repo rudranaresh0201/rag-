@@ -5,11 +5,11 @@ import threading
 import uuid
 from pathlib import Path
 
-from ..core.logging import get_logger
-from ..db import get_collection
-from ..ingestion import ingest_pdf_file_path
-from ..storage import list_all_pdfs_in_r2, download_pdf_from_r2
-from ..utils.hashing import compute_hash
+from core.logging import get_logger
+from db import get_collection
+from ingestion import ingest_pdf_file_path
+from storage import list_all_pdfs_in_r2, download_pdf_from_r2
+from utils.hashing import compute_hash
 
 logger = get_logger(__name__)
 _rebuilding = False

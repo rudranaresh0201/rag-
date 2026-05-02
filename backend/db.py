@@ -11,7 +11,7 @@ from chromadb.api.models.Collection import Collection
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
-from .core.logging import get_logger
+from core.logging import get_logger
 
 BASE_DIR = Path(__file__).resolve().parent
 CHROMA_PATH = os.getenv("CHROMA_PATH", str((BASE_DIR / "chroma_db").resolve()))

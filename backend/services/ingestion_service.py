@@ -4,11 +4,11 @@ import hashlib
 import uuid
 from pathlib import Path
 
-from ..core.logging import get_logger
-from ..db import get_collection
-from ..ingestion import ingest_pdf_file_path
-from ..storage import upload_pdf_to_r2, build_r2_key
-from ..tasks import set_task_status, set_task_error
+from core.logging import get_logger
+from db import get_collection
+from ingestion import ingest_pdf_file_path
+from storage import upload_pdf_to_r2, build_r2_key
+from tasks import set_task_status, set_task_error
 
 logger = get_logger(__name__)
 
@@ -46,7 +46,7 @@ def run_ingest_task(task_id: str, save_path: Path, safe_name: str, actual_size: 
         import os
 
         if os.getenv("USE_R2", "false").lower() == "true":
-            from ..storage import maybe_upload_to_r2
+            from storage import maybe_upload_to_r2
             maybe_upload_to_r2(save_path, doc_id, safe_name)
         set_task_status(task_id, "done")
         logger.info("[INGEST] Success filename=%s doc_id=%s", safe_name, doc_id)

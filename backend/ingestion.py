@@ -10,10 +10,10 @@ try:
 except ImportError:
     fitz = None
 
-from .db import embed_texts, get_collection
-from .utils import chunk_text, clean_text
+from db import embed_texts, get_collection
+from utils import chunk_text, clean_text
 
-from .core.logging import get_logger
+from core.logging import get_logger
 
 logger = get_logger(__name__)
 

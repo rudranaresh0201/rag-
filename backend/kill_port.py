@@ -5,7 +5,7 @@ import subprocess
 import sys
 from typing import Set
 
-from .core.logging import get_logger
+from core.logging import get_logger
 
 PORT = "8003"
 logger = get_logger(__name__)

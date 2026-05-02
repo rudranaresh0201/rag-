@@ -26,7 +26,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.utils import logging as hf_logging
 
-from .core.logging import get_logger
+from core.logging import get_logger
 
 MODEL_NAME = "microsoft/phi-2"
 USE_OPENROUTER = True

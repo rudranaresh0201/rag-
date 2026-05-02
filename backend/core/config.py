@@ -16,6 +16,6 @@ if ENV_PATH.exists():
                 key, value = line.split("=", 1)
                 os.environ[key.strip()] = value.strip()
 
-from ..config import get_allowed_origins, get_max_upload_bytes
+from config import get_allowed_origins, get_max_upload_bytes
 
 __all__ = ["get_allowed_origins", "get_max_upload_bytes"]

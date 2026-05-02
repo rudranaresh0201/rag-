@@ -8,8 +8,8 @@ from typing import Any, List, TypedDict
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
-from .core.logging import get_logger
-from .db import get_collection, get_embedder
+from core.logging import get_logger
+from db import get_collection, get_embedder
 
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
 CROSS_ENCODER_MODEL_NAME = os.getenv("CROSS_ENCODER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")

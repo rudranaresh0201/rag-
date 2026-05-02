@@ -6,14 +6,14 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 
-from .deps import require_api_key
-from ..core.config import get_max_upload_bytes
-from ..core.logging import get_logger
-from ..db import get_collection, reset_database
-from ..ingestion import InvalidPDFError, MissingDependencyError
-from ..services.ingestion_service import run_ingest_task
-from ..services.rebuild_service import is_rebuilding
-from ..tasks import create_task, get_task_status
+from deps import require_api_key
+from core.config import get_max_upload_bytes
+from core.logging import get_logger
+from db import get_collection, reset_database
+from ingestion import InvalidPDFError, MissingDependencyError
+from services.ingestion_service import run_ingest_task
+from services.rebuild_service import is_rebuilding
+from tasks import create_task, get_task_status
 
 router = APIRouter()
 logger = get_logger(__name__)

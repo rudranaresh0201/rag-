@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ..retrieval import retrieve_chunks
-from ..llm_router import generate_answer
+from retrieval import retrieve_chunks
+from llm_router import generate_answer
 
 
 def retrieve_chunks_sync(query: str, top_k: int, document_id: str | None) -> dict:

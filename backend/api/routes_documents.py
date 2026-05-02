@@ -5,10 +5,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .deps import require_api_key
-from ..core.logging import get_logger
-from ..db import get_all_records, get_collection
-from ..storage import list_all_pdfs_in_r2, delete_pdf_from_r2
+from deps import require_api_key
+from core.logging import get_logger
+from db import get_all_records, get_collection
+from storage import list_all_pdfs_in_r2, delete_pdf_from_r2
 
 router = APIRouter()
 logger = get_logger(__name__)

@@ -5,11 +5,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .deps import require_api_key
-from ..core.logging import get_logger
-from ..models.schemas import QueryRequest
-from ..services.rebuild_service import is_rebuild_locked
-from ..services.retrieval_service import retrieve_chunks_sync, generate_answer_sync
+from deps import require_api_key
+from core.logging import get_logger
+from models.schemas import QueryRequest
+from services.rebuild_service import is_rebuild_locked
+from services.retrieval_service import retrieve_chunks_sync, generate_answer_sync
 
 router = APIRouter()
 logger = get_logger(__name__)
