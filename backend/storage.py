@@ -87,3 +87,20 @@ def list_all_pdfs_in_r2() -> list[str]:
         break
 
     return keys
+
+
+# ✅ NEW: SAFE WRAPPER (LOCAL MODE FRIENDLY)
+def maybe_upload_to_r2(local_path: Path, doc_id: str, filename: str) -> str | None:
+    """
+    Upload only if R2 is enabled.
+    Prevents crashes in local dev.
+    """
+    if os.getenv("USE_R2", "false").strip().lower() != "true":
+        return None  # skip silently in local mode
+
+    try:
+        return upload_pdf_to_r2(local_path, doc_id, filename)
+    except Exception as e:
+        # Don't crash ingestion — just log
+        print("[R2 UPLOAD FAILED]", e)
+        return None

@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 @router.post("/query")
 async def query_endpoint(
     request: QueryRequest,
-    _: None = Depends(require_api_key),
+    _: None = None,
 ) -> dict[str, Any]:
     try:
         logger.info("[QUERY] /query HIT")

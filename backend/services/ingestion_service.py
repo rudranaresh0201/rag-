@@ -28,7 +28,7 @@ def run_ingest_task(task_id: str, save_path: Path, safe_name: str, actual_size: 
         content_hash = hasher.hexdigest()
 
         collection = get_collection()
-        existing = collection.get(where={"content_hash": content_hash}, include=["ids"])
+        existing = collection.get(where={"content_hash": content_hash})
         if existing.get("ids"):
             logger.info("[INGEST] Duplicate content hash; skipping ingestion filename=%s", safe_name)
             set_task_status(task_id, "done")
@@ -43,7 +43,11 @@ def run_ingest_task(task_id: str, save_path: Path, safe_name: str, actual_size: 
             s3_key=s3_key,
             file_hash=content_hash,
         )
-        upload_pdf_to_r2(save_path, doc_id, safe_name)
+        import os
+
+        if os.getenv("USE_R2", "false").lower() == "true":
+            from ..storage import maybe_upload_to_r2
+            maybe_upload_to_r2(save_path, doc_id, safe_name)
         set_task_status(task_id, "done")
         logger.info("[INGEST] Success filename=%s doc_id=%s", safe_name, doc_id)
     except Exception:

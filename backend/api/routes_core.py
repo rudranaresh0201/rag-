@@ -33,7 +33,7 @@ def health() -> dict[str, Any]:
 async def upload_pdf(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
-    _: None = Depends(require_api_key),
+    _: None = None,
 ) -> dict[str, Any]:
     if is_rebuilding():
         raise HTTPException(
