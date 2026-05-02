@@ -8,13 +8,13 @@ from fastapi.responses import JSONResponse
 from fastapi import Request
 
 from  core.config import get_allowed_origins
-from .core.logging import get_logger
-from .db import get_embedder
-from .retrieval import warmup_bm25_index
-from .services.rebuild_service import rebuild_from_r2_if_empty
-from .api.routes_core import router as core_router
-from .api.routes_query import router as query_router
-from .api.routes_documents import router as documents_router
+from core.logging import get_logger
+from db import get_embedder
+from retrieval import warmup_bm25_index
+from services.rebuild_service import rebuild_from_r2_if_empty
+from api.routes_core import router as core_router
+from api.routes_query import router as query_router
+from api.routes_documents import router as documents_router
 
 app = FastAPI(title="PDF RAG Backend", version="2.0.0")
 logger = get_logger(__name__)
