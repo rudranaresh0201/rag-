@@ -22,9 +22,9 @@ if HF_CACHE_DIR:
 from typing import Any
 
 from openai import OpenAI
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers.utils import logging as hf_logging
+# import torch
+# from transformers import AutoTokenizer, AutoModelForCausalLM
+# from transformers.utils import logging as hf_logging
 
 from core.logging import get_logger
 
